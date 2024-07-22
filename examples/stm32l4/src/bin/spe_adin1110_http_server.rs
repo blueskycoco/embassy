@@ -86,7 +86,7 @@ async fn main(spawner: Spawner) {
             divq: None,
             divr: Some(PllRDiv::DIV2), // sysclk 80Mhz clock (8 / 1 * 20 / 2)
         });
-        config.rcc.hsi48 = Some(Default::default()); // needed for RNG
+        //config.rcc.hsi48 = Some(Default::default()); // needed for RNG
     }
 
     let dp = embassy_stm32::init(config);
@@ -114,8 +114,8 @@ async fn main(spawner: Spawner) {
         dp.PG7,
         dp.PG8,
         Irqs,
-        dp.DMA1_CH6,
-        dp.DMA1_CH7,
+        dp.DMA1_CH2,
+        dp.DMA1_CH3,
         Hertz(100_000),
         I2C_Config::default(),
     );
@@ -142,8 +142,8 @@ async fn main(spawner: Spawner) {
         spe_spi_sclk,
         spe_spi_mosi,
         spe_spi_miso,
-        dp.DMA1_CH1,
-        dp.DMA1_CH2,
+        dp.DMA1_CH5,
+        dp.DMA1_CH4,
         spi_config,
     );
     let spe_spi = SpeSpiCs::new(spe_spi, spe_spi_cs_n, Delay);
