@@ -27,6 +27,24 @@ async fn blinky(pin: AnyPin) {
     }
 }
 
+fn clear(ary: &mut [u8]) {
+    ary.iter_mut().for_each(|m| *m = 0)
+}
+
+async fn usr_cmd(usart: &mut Uart<'_, embassy_stm32::mode::Async>, cmd: &str) {
+    let mut s = [0u8; 128];
+    unwrap!(usart.write(cmd.as_bytes()).await);
+    loop {
+        unwrap!(usart.read_until_idle(&mut s).await);
+        let str_resp = core::str::from_utf8(&s).unwrap();
+        info!("{}", str_resp);
+        if str_resp.contains("+ok") || str_resp.contains("+ERR") {
+            break;
+        }
+        clear(&mut s);
+    }
+}
+
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
     let mut config = embassy_stm32::Config::default();
@@ -54,37 +72,27 @@ async fn main(spawner: Spawner) {
     spawner.spawn(blinky(p.PB0.degrade())).unwrap();
     let config = Config::default();
     let mut usart = Uart::new(p.USART2, p.PA3, p.PA2, Irqs, p.DMA1_CH7, p.DMA1_CH6, config).unwrap();
-    //let mut led = Output::new(p.PB0, Level::High, Speed::Low);
     let mut rst = Output::new(p.PA0, Level::High, Speed::Low);
+    let mut s  = [0u8; 64];
     Timer::after_millis(200).await;
     rst.set_low();
     Timer::after_millis(300).await;
     rst.set_high();
     Timer::after_millis(1500).await;
 
-    let mut s  = [0u8; 1000];
-    let mut t  = [0u8; 20];
-    let mut a  = [0u8; 1];
     unwrap!(usart.write("+++".as_bytes()).await);
-    //Timer::after_millis(100).await;
-    info!("0\n");
-    unwrap!(usart.read(&mut a).await);
-    let str_resp = core::str::from_utf8(&a).unwrap();
-    info!("1 {}\n", str_resp);
+    unwrap!(usart.read_until_idle(&mut s).await);
     unwrap!(usart.write("a".as_bytes()).await);
-    Timer::after_millis(10).await;
-    unwrap!(usart.write(b"at+h\r").await);
-    unwrap!(usart.read(&mut s).await);
-    let str_resp = core::str::from_utf8(&s).unwrap();
-    info!("2 {}", str_resp);
-    unwrap!(usart.read(&mut t).await);
-    let str_resp = core::str::from_utf8(&t).unwrap();
-    info!("3 {}", str_resp);
-    loop {
-     //   led.set_high();
-        Timer::after_millis(1000).await;
+    unwrap!(usart.read_until_idle(&mut s).await);
 
-     //   led.set_low();
-        Timer::after_millis(1000).await;
+    Timer::after_millis(100).await;
+    //usr_cmd(&mut usart, "at+wskey=wpa2psk,aes,DUBB-JcJf-kU4g-C3IY\r").await;
+    //usr_cmd(&mut usart, "at+wsssid=8848\r").await;
+    //usr_cmd(&mut usart, "at+wmode=sta\r").await;
+    loop {
+        usr_cmd(&mut usart, "at+wann\r").await;
+        usr_cmd(&mut usart, "at+lann\r").await;
+        usr_cmd(&mut usart, "at+ping=172.20.10.6\r").await;
+        Timer::after_millis(2000).await;
     }
 }
