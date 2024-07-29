@@ -31,17 +31,34 @@ fn clear(ary: &mut [u8]) {
     ary.iter_mut().for_each(|m| *m = 0)
 }
 
-async fn usr_cmd(usart: &mut Uart<'_, embassy_stm32::mode::Async>, cmd: &str) {
+async fn usr_init(usart: &mut Uart<'_, embassy_stm32::mode::Async>) -> bool {
     let mut s = [0u8; 128];
-    unwrap!(usart.write(cmd.as_bytes()).await);
+    unwrap!(usart.write("+++".as_bytes()).await);
+    unwrap!(usart.read_until_idle(&mut s).await);
+    unwrap!(usart.write("a".as_bytes()).await);
+    unwrap!(usart.read_until_idle(&mut s).await);
+
+    Timer::after_millis(100).await;
     loop {
-        unwrap!(usart.read_until_idle(&mut s).await);
-        let str_resp = core::str::from_utf8(&s).unwrap();
-        info!("{}", str_resp);
-        if str_resp.contains("+ok") || str_resp.contains("+ERR") {
-            break;
+        unwrap!(usart.write("at+ping=172.20.10.6\r".as_bytes()).await);
+        loop {
+            unwrap!(usart.read_until_idle(&mut s).await);
+            let str_resp = core::str::from_utf8(&s).unwrap();
+            info!("{}", str_resp);
+            if str_resp.contains("Success") {
+                unwrap!(usart.write("at+wann\r".as_bytes()).await);
+                unwrap!(usart.read_until_idle(&mut s).await);
+                let str_resp = core::str::from_utf8(&s).unwrap();
+                info!("{}", str_resp);
+                unwrap!(usart.write("at+entm\r".as_bytes()).await);
+                Timer::after_millis(100).await;
+                return true;
+            } else if str_resp.contains("+ok") || str_resp.contains("+ERR") {
+                break;
+            }
+            clear(&mut s);
         }
-        clear(&mut s);
+        Timer::after_millis(1000).await;
     }
 }
 
@@ -67,32 +84,21 @@ async fn main(spawner: Spawner) {
     }
     let p = embassy_stm32::init(config);
     //let p = embassy_stm32::init(Default::default());
-    info!("Hello World!");
 
     spawner.spawn(blinky(p.PB0.degrade())).unwrap();
     let config = Config::default();
     let mut usart = Uart::new(p.USART2, p.PA3, p.PA2, Irqs, p.DMA1_CH7, p.DMA1_CH6, config).unwrap();
     let mut rst = Output::new(p.PA0, Level::High, Speed::Low);
-    let mut s  = [0u8; 64];
     Timer::after_millis(200).await;
     rst.set_low();
     Timer::after_millis(300).await;
     rst.set_high();
     Timer::after_millis(1500).await;
 
-    unwrap!(usart.write("+++".as_bytes()).await);
-    unwrap!(usart.read_until_idle(&mut s).await);
-    unwrap!(usart.write("a".as_bytes()).await);
-    unwrap!(usart.read_until_idle(&mut s).await);
-
-    Timer::after_millis(100).await;
+    usr_init(&mut usart).await;
     //usr_cmd(&mut usart, "at+wskey=wpa2psk,aes,DUBB-JcJf-kU4g-C3IY\r").await;
     //usr_cmd(&mut usart, "at+wsssid=8848\r").await;
     //usr_cmd(&mut usart, "at+wmode=sta\r").await;
-    loop {
-        usr_cmd(&mut usart, "at+wann\r").await;
-        usr_cmd(&mut usart, "at+lann\r").await;
-        usr_cmd(&mut usart, "at+ping=172.20.10.6\r").await;
-        Timer::after_millis(2000).await;
-    }
+
+    info!("going to do network");
 }
