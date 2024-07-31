@@ -86,12 +86,15 @@ async fn main(spawner: Spawner) {
     unwrap!(usart.write("a".as_bytes()).await);
     unwrap!(usart.read_until_idle(&mut s).await);
 
-    Timer::after_millis(100).await;
+    Timer::after_millis(200).await;
+    usr_cmd(&mut usart, &mut tx, "at+wmode=apsta\r").await;
+    usr_cmd(&mut usart, &mut tx, "at+netp=TCP,Server,1234,172.20.10.2\r").await;
+    usr_cmd(&mut usart, &mut tx, "at+tcpdis=on\r").await;
     loop {
         usr_cmd(&mut usart, &mut tx, "at+wann\r").await;
-        usr_cmd(&mut usart, &mut tx, "at+lann\r").await;
-        usr_cmd(&mut usart, &mut tx, "at+ping=172.20.10.11\r").await;
-        usr_cmd(&mut usart, &mut tx, "at+h\r").await;
+        usr_cmd(&mut usart, &mut tx, "at+netp\r").await;
+        usr_cmd(&mut usart, &mut tx, "at+tcplk\r").await;
+        usr_cmd(&mut usart, &mut tx, "at+ping=172.20.10.4\r").await;
         Timer::after_millis(2000).await;
     }
 }
