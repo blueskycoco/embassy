@@ -94,7 +94,7 @@ async fn main(spawner: Spawner) {
         usr_cmd(&mut usart, &mut tx, "at+wann\r").await;
         usr_cmd(&mut usart, &mut tx, "at+netp\r").await;
         usr_cmd(&mut usart, &mut tx, "at+tcplk\r").await;
-        usr_cmd(&mut usart, &mut tx, "at+ping=172.20.10.4\r").await;
+        usr_cmd(&mut usart, &mut tx, "at+ping=172.20.10.6\r").await;
         Timer::after_millis(2000).await;
     }
 }

@@ -31,6 +31,20 @@ fn clear(ary: &mut [u8]) {
     ary.iter_mut().for_each(|m| *m = 0)
 }
 
+async fn usr_cmd(usart: &mut Uart<'_, embassy_stm32::mode::Async>, cmd: &str) {
+    let mut s = [0u8; 128];
+    unwrap!(usart.write(cmd.as_bytes()).await);
+    loop {
+        unwrap!(usart.read_until_idle(&mut s).await);
+        let str_resp = core::str::from_utf8(&s).unwrap();
+        info!("{}", str_resp);
+        if str_resp.contains("+ok") || str_resp.contains("+ERR") {
+            break;
+        }
+        clear(&mut s);
+    }
+}
+
 async fn usr_init(usart: &mut Uart<'_, embassy_stm32::mode::Async>) -> bool {
     let mut s = [0u8; 128];
     unwrap!(usart.write("+++".as_bytes()).await);
@@ -38,7 +52,10 @@ async fn usr_init(usart: &mut Uart<'_, embassy_stm32::mode::Async>) -> bool {
     unwrap!(usart.write("a".as_bytes()).await);
     unwrap!(usart.read_until_idle(&mut s).await);
 
-    Timer::after_millis(100).await;
+    Timer::after_millis(300).await;
+    usr_cmd(usart, "at+wskey=wpa2psk,aes,DUBB-JcJf-kU4g-C3IY\r").await;
+    usr_cmd(usart, "at+wsssid=8848\r").await;
+    usr_cmd(usart, "at+wmode=sta\r").await;
     loop {
         unwrap!(usart.write("at+ping=172.20.10.6\r".as_bytes()).await);
         loop {
@@ -46,11 +63,11 @@ async fn usr_init(usart: &mut Uart<'_, embassy_stm32::mode::Async>) -> bool {
             let str_resp = core::str::from_utf8(&s).unwrap();
             info!("{}", str_resp);
             if str_resp.contains("Success") {
-                unwrap!(usart.write("at+wann\r".as_bytes()).await);
-                unwrap!(usart.read_until_idle(&mut s).await);
-                let str_resp = core::str::from_utf8(&s).unwrap();
-                info!("{}", str_resp);
-                unwrap!(usart.write("at+entm\r".as_bytes()).await);
+                usr_cmd(usart, "at+wann\r").await;
+                usr_cmd(usart, "at+netp=tcp,server,1234,172.20.10.8\r").await;
+                usr_cmd(usart, "at+netp\r").await;
+                //usr_cmd(usart, "at+tcpdis=on\r").await;
+                usr_cmd(usart, "at+tcpdis\r").await;
                 Timer::after_millis(100).await;
                 return true;
             } else if str_resp.contains("+ok") || str_resp.contains("+ERR") {
@@ -94,11 +111,34 @@ async fn main(spawner: Spawner) {
     Timer::after_millis(300).await;
     rst.set_high();
     Timer::after_millis(1500).await;
+    let mut s = [0u8; 128];
+    unwrap!(usart.write("+++".as_bytes()).await);
+    unwrap!(usart.read_until_idle(&mut s).await);
+    unwrap!(usart.write("a".as_bytes()).await);
+    unwrap!(usart.read_until_idle(&mut s).await);
 
+    Timer::after_millis(300).await;
+    usr_cmd(&mut usart, "at+wmode=apsta\r").await;
+    usr_cmd(&mut usart, "at+netp=TCP,Server,1234,172.20.10.2\r").await;
+    usr_cmd(&mut usart, "at+tcpdis=on\r").await;
+    loop {
+        usr_cmd(&mut usart, "at+wann\r").await;
+        usr_cmd(&mut usart, "at+netp\r").await;
+        usr_cmd(&mut usart, "at+tcplk\r").await;
+        usr_cmd(&mut usart, "at+ping=172.20.10.6\r").await;
+        Timer::after_millis(2000).await;
+    }
+/*
     usr_init(&mut usart).await;
-    //usr_cmd(&mut usart, "at+wskey=wpa2psk,aes,DUBB-JcJf-kU4g-C3IY\r").await;
-    //usr_cmd(&mut usart, "at+wsssid=8848\r").await;
-    //usr_cmd(&mut usart, "at+wmode=sta\r").await;
 
     info!("going to do network");
+    loop {
+        usr_cmd(&mut usart, "at+tcplk\r").await;
+/*        usr_cmd(&mut usart, "at+tcpto\r").await;
+        usr_cmd(&mut usart, "at+tcpdis\r").await;
+        usr_cmd(&mut usart, "at+maxsk\r").await;
+        usr_cmd(&mut usart, "at+netp\r").await;
+        usr_cmd(&mut usart, "at+wslq\r").await;*/
+        Timer::after_millis(1000).await;
+    }*/
 }
