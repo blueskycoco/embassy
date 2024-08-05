@@ -53,18 +53,21 @@ fn clear(ary: &mut [u8]) {
     ary.iter_mut().for_each(|m| *m = 0)
 }
 
-async fn usr_cmd(usart: &mut Uart<'_, embassy_stm32::mode::Async>, tx: &mut dyn Write<Error = Error>, cmd: &str) {
-    let mut s = [0u8; 128];
+async fn usr_cmd(usart: &mut Uart<'_, embassy_stm32::mode::Async>,
+                 tx: &mut dyn Write<Error = Error>, cmd: &str,
+                 s: &mut [u8]) {
+    //let mut s = [0u8; 128];
+    clear(s);
     unwrap!(usart.write(cmd.as_bytes()).await);
     loop {
-        unwrap!(usart.read_until_idle(&mut s).await);
-        let str_resp = core::str::from_utf8(&s).unwrap();
+        unwrap!(usart.read_until_idle(s).await);
+        let str_resp = core::str::from_utf8(s).unwrap();
         info!("{}", str_resp);
         writeln!(tx, "{}\r\n", str_resp).unwrap();
         if str_resp.contains("+ok") || str_resp.contains("+ERR") {
             break;
         }
-        clear(&mut s);
+        clear(s);
     }
 }
 
@@ -75,10 +78,12 @@ async fn main(spawner: Spawner) {
     spawner.spawn(blinky(p.PA5.degrade())).unwrap();
     spawner.spawn(btn(p.PC13.degrade(), p.EXTI13.degrade())).unwrap();
     let config = Config::default();
-    let mut usart = Uart::new(p.USART1, p.PA10, p.PA9, Irqs, p.DMA1_CH2, p.DMA1_CH3, config).unwrap();
-    let dbg = Uart::new(p.USART2, p.PA3, p.PA2, Irqs2, p.DMA1_CH4, p.DMA1_CH5, config).unwrap();
+    let mut usart = Uart::new(p.USART1, p.PA10, p.PA9, Irqs, p.DMA1_CH2,
+                              p.DMA1_CH3, config).unwrap();
+    let dbg = Uart::new(p.USART2, p.PA3, p.PA2, Irqs2, p.DMA1_CH4, p.DMA1_CH5,
+                        config).unwrap();
     let (mut tx, _rx) = dbg.split(); 
-    let mut s  = [0u8; 64];
+    let mut s  = [0u8; 128];
 
     /* switch from pass through to at command mode */
     unwrap!(usart.write("+++".as_bytes()).await);
@@ -87,14 +92,26 @@ async fn main(spawner: Spawner) {
     unwrap!(usart.read_until_idle(&mut s).await);
 
     Timer::after_millis(200).await;
-    usr_cmd(&mut usart, &mut tx, "at+wmode=apsta\r").await;
-    usr_cmd(&mut usart, &mut tx, "at+netp=TCP,Server,1234,172.20.10.2\r").await;
-    usr_cmd(&mut usart, &mut tx, "at+tcpdis=on\r").await;
+    usr_cmd(&mut usart, &mut tx, "at+wmode=apsta\r", &mut s).await;
+    usr_cmd(&mut usart, &mut tx, "at+netp=TCP,Server,1234,172.20.10.2\r",
+            &mut s).await;
+    usr_cmd(&mut usart, &mut tx, "at+tcpdis=on\r", &mut s).await;
     loop {
-        usr_cmd(&mut usart, &mut tx, "at+wann\r").await;
-        usr_cmd(&mut usart, &mut tx, "at+netp\r").await;
-        usr_cmd(&mut usart, &mut tx, "at+tcplk\r").await;
-        usr_cmd(&mut usart, &mut tx, "at+ping=172.20.10.6\r").await;
+        usr_cmd(&mut usart, &mut tx, "at+wann\r", &mut s).await;
+        usr_cmd(&mut usart, &mut tx, "at+netp\r", &mut s).await;
+        usr_cmd(&mut usart, &mut tx, "at+tcplk\r", &mut s).await;
+        let tcplk = core::str::from_utf8(&s).unwrap();
+        if tcplk.contains("on") {
+            info!("network stable!");
+            usr_cmd(&mut usart, &mut tx, "at+entm\r", &mut s).await;
+            break;
+        }
+        usr_cmd(&mut usart, &mut tx, "at+ping=172.20.10.4\r", &mut s).await;
         Timer::after_millis(2000).await;
+    }
+    let mut pic  = [0u8; 2048];
+    loop {
+        unwrap!(usart.write("send ok".as_bytes()).await);
+        unwrap!(usart.read_until_idle(&mut pic).await);
     }
 }
