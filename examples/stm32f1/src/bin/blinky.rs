@@ -11,6 +11,7 @@ use embassy_stm32::time::Hertz;
 use embedded_io_async::BufRead;
 use embedded_io_async::{Read, Write};
 use static_cell::StaticCell;
+use md5_rs::Context;
 use {defmt_rtt as _, panic_probe as _};
 
 bind_interrupts!(struct Irqs {
@@ -166,5 +167,16 @@ async fn main(spawner: Spawner) {
     loop {
         unwrap!(usr_tx.write_all("send ok".as_bytes()).await);
         unwrap!(usr_rx.read_exact(&mut pic).await);
+        let mut ctx = Context::new();
+        ctx.read(&pic[22..]);
+        let digest = ctx.finish();
+        let remote_dig = &pic[2..18];
+        if digest != remote_dig {
+            error!("md5 missmatch");
+            error!("L {:?}", digest);
+            error!("R {:?}", remote_dig);
+        } else {
+            info!("pic send ok");
+        }
     }
 }
