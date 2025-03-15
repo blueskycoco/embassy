@@ -17,7 +17,7 @@ use self::registers::{Registers, RxFifo};
 pub use super::common::{BufferedCanReceiver, BufferedCanSender};
 use super::frame::{Envelope, Frame};
 use super::util;
-use crate::can::enums::{BusError, TryReadError};
+use crate::can::enums::{BusError, InternalOperation, TryReadError};
 use crate::gpio::{AfType, OutputType, Pull, Speed};
 use crate::interrupt::typelevel::Interrupt;
 use crate::rcc::{self, RccPeripheral};
@@ -502,6 +502,14 @@ impl<'d, const TX_BUF_SIZE: usize, const RX_BUF_SIZE: usize> BufferedCan<'d, TX_
     pub fn reader(&self) -> BufferedCanReceiver {
         self.rx.reader()
     }
+
+    /// Accesses the filter banks owned by this CAN peripheral.
+    ///
+    /// To modify filters of a slave peripheral, `modify_filters` has to be called on the master
+    /// peripheral instead.
+    pub fn modify_filters(&mut self) -> MasterFilters<'_> {
+        self.rx.modify_filters()
+    }
 }
 
 /// CAN driver, transmit half.
@@ -677,22 +685,18 @@ impl<'d, const TX_BUF_SIZE: usize> BufferedCanTx<'d, TX_BUF_SIZE> {
 
     /// Returns a sender that can be used for sending CAN frames.
     pub fn writer(&self) -> BufferedCanSender {
+        (self.info.internal_operation)(InternalOperation::NotifySenderCreated);
         BufferedCanSender {
             tx_buf: self.tx_buf.sender().into(),
             waker: self.info.tx_waker,
+            internal_operation: self.info.internal_operation,
         }
     }
 }
 
 impl<'d, const TX_BUF_SIZE: usize> Drop for BufferedCanTx<'d, TX_BUF_SIZE> {
     fn drop(&mut self) {
-        critical_section::with(|_| {
-            let state = self.state as *const State;
-            unsafe {
-                let mut_state = state as *mut State;
-                (*mut_state).tx_mode = TxMode::NonBuffered(embassy_sync::waitqueue::AtomicWaker::new());
-            }
-        });
+        (self.info.internal_operation)(InternalOperation::NotifySenderDestroyed);
     }
 }
 
@@ -733,6 +737,14 @@ impl<'d> CanRx<'d> {
     ) -> BufferedCanRx<'d, RX_BUF_SIZE> {
         BufferedCanRx::new(self.info, self.state, self, rxb)
     }
+
+    /// Accesses the filter banks owned by this CAN peripheral.
+    ///
+    /// To modify filters of a slave peripheral, `modify_filters` has to be called on the master
+    /// peripheral instead.
+    pub fn modify_filters(&mut self) -> MasterFilters<'_> {
+        unsafe { MasterFilters::new(self.info) }
+    }
 }
 
 /// User supplied buffer for RX Buffering
@@ -742,16 +754,16 @@ pub type RxBuf<const BUF_SIZE: usize> = Channel<CriticalSectionRawMutex, Result<
 pub struct BufferedCanRx<'d, const RX_BUF_SIZE: usize> {
     info: &'static Info,
     state: &'static State,
-    _rx: CanRx<'d>,
+    rx: CanRx<'d>,
     rx_buf: &'static RxBuf<RX_BUF_SIZE>,
 }
 
 impl<'d, const RX_BUF_SIZE: usize> BufferedCanRx<'d, RX_BUF_SIZE> {
-    fn new(info: &'static Info, state: &'static State, _rx: CanRx<'d>, rx_buf: &'static RxBuf<RX_BUF_SIZE>) -> Self {
+    fn new(info: &'static Info, state: &'static State, rx: CanRx<'d>, rx_buf: &'static RxBuf<RX_BUF_SIZE>) -> Self {
         BufferedCanRx {
             info,
             state,
-            _rx,
+            rx,
             rx_buf,
         }
         .setup()
@@ -809,19 +821,25 @@ impl<'d, const RX_BUF_SIZE: usize> BufferedCanRx<'d, RX_BUF_SIZE> {
 
     /// Returns a receiver that can be used for receiving CAN frames. Note, each CAN frame will only be received by one receiver.
     pub fn reader(&self) -> BufferedCanReceiver {
-        self.rx_buf.receiver().into()
+        (self.info.internal_operation)(InternalOperation::NotifyReceiverCreated);
+        BufferedCanReceiver {
+            rx_buf: self.rx_buf.receiver().into(),
+            internal_operation: self.info.internal_operation,
+        }
+    }
+
+    /// Accesses the filter banks owned by this CAN peripheral.
+    ///
+    /// To modify filters of a slave peripheral, `modify_filters` has to be called on the master
+    /// peripheral instead.
+    pub fn modify_filters(&mut self) -> MasterFilters<'_> {
+        self.rx.modify_filters()
     }
 }
 
 impl<'d, const RX_BUF_SIZE: usize> Drop for BufferedCanRx<'d, RX_BUF_SIZE> {
     fn drop(&mut self) {
-        critical_section::with(|_| {
-            let state = self.state as *const State;
-            unsafe {
-                let mut_state = state as *mut State;
-                (*mut_state).rx_mode = RxMode::NonBuffered(embassy_sync::waitqueue::AtomicWaker::new());
-            }
-        });
+        (self.info.internal_operation)(InternalOperation::NotifyReceiverDestroyed);
     }
 }
 
@@ -893,7 +911,7 @@ impl RxMode {
                     RxFifo::Fifo0 => 0usize,
                     RxFifo::Fifo1 => 1usize,
                 };
-                T::regs().ier().write(|w| {
+                T::regs().ier().modify(|w| {
                     w.set_fmpie(fifo_idx, false);
                 });
                 waker.wake();
@@ -936,18 +954,22 @@ impl RxMode {
             Self::NonBuffered(_) => {
                 let registers = &info.regs;
                 if let Some(msg) = registers.receive_fifo(RxFifo::Fifo0) {
-                    registers.0.ier().write(|w| {
+                    registers.0.ier().modify(|w| {
                         w.set_fmpie(0, true);
                     });
                     Ok(msg)
                 } else if let Some(msg) = registers.receive_fifo(RxFifo::Fifo1) {
-                    registers.0.ier().write(|w| {
+                    registers.0.ier().modify(|w| {
                         w.set_fmpie(1, true);
                     });
                     Ok(msg)
                 } else if let Some(err) = registers.curr_error() {
                     Err(TryReadError::BusError(err))
                 } else {
+                    registers.0.ier().modify(|w| {
+                        w.set_fmpie(0, true);
+                        w.set_fmpie(1, true);
+                    });
                     Err(TryReadError::Empty)
                 }
             }
@@ -1020,6 +1042,8 @@ pub(crate) struct State {
     pub(crate) rx_mode: RxMode,
     pub(crate) tx_mode: TxMode,
     pub err_waker: AtomicWaker,
+    receiver_instance_count: usize,
+    sender_instance_count: usize,
 }
 
 impl State {
@@ -1028,6 +1052,8 @@ impl State {
             rx_mode: RxMode::NonBuffered(AtomicWaker::new()),
             tx_mode: TxMode::NonBuffered(AtomicWaker::new()),
             err_waker: AtomicWaker::new(),
+            receiver_instance_count: 1,
+            sender_instance_count: 1,
         }
     }
 }
@@ -1039,6 +1065,7 @@ pub(crate) struct Info {
     rx1_interrupt: crate::interrupt::Interrupt,
     sce_interrupt: crate::interrupt::Interrupt,
     tx_waker: fn(),
+    internal_operation: fn(InternalOperation),
 
     /// The total number of filter banks available to the instance.
     ///
@@ -1051,6 +1078,7 @@ trait SealedInstance {
     fn regs() -> crate::pac::can::Can;
     fn state() -> &'static State;
     unsafe fn mut_state() -> &'static mut State;
+    fn internal_operation(val: InternalOperation);
 }
 
 /// CAN instance trait.
@@ -1108,6 +1136,7 @@ foreach_peripheral!(
                     rx1_interrupt: crate::_generated::peripheral_interrupts::$inst::RX1::IRQ,
                     sce_interrupt: crate::_generated::peripheral_interrupts::$inst::SCE::IRQ,
                     tx_waker: crate::_generated::peripheral_interrupts::$inst::TX::pend,
+                    internal_operation: peripherals::$inst::internal_operation,
                     num_filter_banks: peripherals::$inst::NUM_FILTER_BANKS,
                 };
                 &INFO
@@ -1122,6 +1151,37 @@ foreach_peripheral!(
             }
             fn state() -> &'static State {
                 unsafe { peripherals::$inst::mut_state() }
+            }
+
+
+            fn internal_operation(val: InternalOperation) {
+                critical_section::with(|_| {
+                    //let state = self.state as *const State;
+                    unsafe {
+                        //let mut_state = state as *mut State;
+                        let mut_state = peripherals::$inst::mut_state();
+                        match val {
+                            InternalOperation::NotifySenderCreated => {
+                                mut_state.sender_instance_count += 1;
+                            }
+                            InternalOperation::NotifySenderDestroyed => {
+                                mut_state.sender_instance_count -= 1;
+                                if ( 0 == mut_state.sender_instance_count) {
+                                    (*mut_state).tx_mode = TxMode::NonBuffered(embassy_sync::waitqueue::AtomicWaker::new());
+                                }
+                            }
+                            InternalOperation::NotifyReceiverCreated => {
+                                mut_state.receiver_instance_count += 1;
+                            }
+                            InternalOperation::NotifyReceiverDestroyed => {
+                                mut_state.receiver_instance_count -= 1;
+                                if ( 0 == mut_state.receiver_instance_count) {
+                                    (*mut_state).rx_mode = RxMode::NonBuffered(embassy_sync::waitqueue::AtomicWaker::new());
+                                }
+                            }
+                        }
+                    }
+                });
             }
         }
 

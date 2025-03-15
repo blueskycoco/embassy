@@ -72,6 +72,48 @@ where
     pub fn poll_ready_to_send(&self, cx: &mut Context<'_>) -> Poll<()> {
         self.channel.poll_ready_to_send(cx)
     }
+
+    /// Returns the maximum number of elements the channel can hold.
+    ///
+    /// See [`Channel::capacity()`]
+    pub const fn capacity(&self) -> usize {
+        self.channel.capacity()
+    }
+
+    /// Returns the free capacity of the channel.
+    ///
+    /// See [`Channel::free_capacity()`]
+    pub fn free_capacity(&self) -> usize {
+        self.channel.free_capacity()
+    }
+
+    /// Clears all elements in the channel.
+    ///
+    /// See [`Channel::clear()`]
+    pub fn clear(&self) {
+        self.channel.clear();
+    }
+
+    /// Returns the number of elements currently in the channel.
+    ///
+    /// See [`Channel::len()`]
+    pub fn len(&self) -> usize {
+        self.channel.len()
+    }
+
+    /// Returns whether the channel is empty.
+    ///
+    /// See [`Channel::is_empty()`]
+    pub fn is_empty(&self) -> bool {
+        self.channel.is_empty()
+    }
+
+    /// Returns whether the channel is full.
+    ///
+    /// See [`Channel::is_full()`]
+    pub fn is_full(&self) -> bool {
+        self.channel.is_full()
+    }
 }
 
 /// Send-only access to a [`Channel`] without knowing channel size.
@@ -179,6 +221,48 @@ where
     pub fn poll_receive(&self, cx: &mut Context<'_>) -> Poll<T> {
         self.channel.poll_receive(cx)
     }
+
+    /// Returns the maximum number of elements the channel can hold.
+    ///
+    /// See [`Channel::capacity()`]
+    pub const fn capacity(&self) -> usize {
+        self.channel.capacity()
+    }
+
+    /// Returns the free capacity of the channel.
+    ///
+    /// See [`Channel::free_capacity()`]
+    pub fn free_capacity(&self) -> usize {
+        self.channel.free_capacity()
+    }
+
+    /// Clears all elements in the channel.
+    ///
+    /// See [`Channel::clear()`]
+    pub fn clear(&self) {
+        self.channel.clear();
+    }
+
+    /// Returns the number of elements currently in the channel.
+    ///
+    /// See [`Channel::len()`]
+    pub fn len(&self) -> usize {
+        self.channel.len()
+    }
+
+    /// Returns whether the channel is empty.
+    ///
+    /// See [`Channel::is_empty()`]
+    pub fn is_empty(&self) -> bool {
+        self.channel.is_empty()
+    }
+
+    /// Returns whether the channel is full.
+    ///
+    /// See [`Channel::is_full()`]
+    pub fn is_full(&self) -> bool {
+        self.channel.is_full()
+    }
 }
 
 /// Receive-only access to a [`Channel`] without knowing channel size.
@@ -230,6 +314,17 @@ where
 {
     fn from(s: Receiver<'ch, M, T, N>) -> Self {
         Self { channel: s.channel }
+    }
+}
+
+impl<'ch, M, T, const N: usize> futures_util::Stream for Receiver<'ch, M, T, N>
+where
+    M: RawMutex,
+{
+    type Item = T;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        self.channel.poll_receive(cx).map(Some)
     }
 }
 
@@ -478,6 +573,9 @@ impl<T, const N: usize> ChannelState<T, N> {
     }
 
     fn clear(&mut self) {
+        if self.queue.is_full() {
+            self.senders_waker.wake();
+        }
         self.queue.clear();
     }
 
@@ -681,6 +779,17 @@ where
 
     fn poll_receive(&self, cx: &mut Context<'_>) -> Poll<T> {
         Channel::poll_receive(self, cx)
+    }
+}
+
+impl<M, T, const N: usize> futures_util::Stream for Channel<M, T, N>
+where
+    M: RawMutex,
+{
+    type Item = T;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        self.poll_receive(cx).map(Some)
     }
 }
 

@@ -109,7 +109,10 @@ impl ClockConfig {
                 sys_pll: Some(PllConfig {
                     refdiv: 1,
                     fbdiv: 125,
+                    #[cfg(feature = "rp2040")]
                     post_div1: 6,
+                    #[cfg(feature = "_rp235x")]
+                    post_div1: 5,
                     post_div2: 2,
                 }),
                 usb_pll: Some(PllConfig {
@@ -521,8 +524,13 @@ pub(crate) unsafe fn init(config: ClockConfig) {
     // Configure tick generator on the 2350
     #[cfg(feature = "_rp235x")]
     {
-        pac::TICKS.timer0_cycles().write(|w| w.0 = clk_ref_freq / 1_000_000);
+        let cycle_count = clk_ref_freq / 1_000_000;
+
+        pac::TICKS.timer0_cycles().write(|w| w.0 = cycle_count);
         pac::TICKS.timer0_ctrl().write(|w| w.set_enable(true));
+
+        pac::TICKS.watchdog_cycles().write(|w| w.0 = cycle_count);
+        pac::TICKS.watchdog_ctrl().write(|w| w.set_enable(true));
     }
 
     let (sys_src, sys_aux, clk_sys_freq) = {

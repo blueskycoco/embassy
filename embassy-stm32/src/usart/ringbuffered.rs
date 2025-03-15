@@ -5,12 +5,15 @@ use core::task::Poll;
 
 use embassy_embedded_hal::SetConfig;
 use embassy_hal_internal::PeripheralRef;
+use embedded_io_async::ReadReady;
 use futures_util::future::{select, Either};
 
-use super::{clear_interrupt_flags, rdr, reconfigure, sr, Config, ConfigError, Error, Info, State, UartRx};
+use super::{rdr, reconfigure, set_baudrate, sr, Config, ConfigError, Error, Info, State, UartRx};
 use crate::dma::ReadableRingBuffer;
 use crate::gpio::{AnyPin, SealedPin as _};
 use crate::mode::Async;
+#[cfg(any(usart_v3, usart_v4))]
+use crate::pac::usart::regs;
 use crate::time::Hertz;
 use crate::usart::{Regs, Sr};
 
@@ -83,7 +86,6 @@ impl<'d> RingBufferedUartRx<'d> {
         // Clear the buffer so that it is ready to receive data
         compiler_fence(Ordering::SeqCst);
         self.ring_buf.start();
-        self.ring_buf.clear();
 
         let r = self.info.regs;
         // clear all interrupts and DMA Rx Request
@@ -213,6 +215,11 @@ impl<'d> RingBufferedUartRx<'d> {
             Either::Right(((), _)) => Ok(()),
         }
     }
+
+    /// Set baudrate
+    pub fn set_baudrate(&self, baudrate: u32) -> Result<(), ConfigError> {
+        set_baudrate(self.info, self.kernel_clock, baudrate)
+    }
 }
 
 impl Drop for RingBufferedUartRx<'_> {
@@ -247,7 +254,12 @@ fn clear_idle_flag(r: Regs) -> Sr {
 
     // This read also clears the error and idle interrupt flags on v1.
     unsafe { rdr(r).read_volatile() };
-    clear_interrupt_flags(r, sr);
+    #[cfg(any(usart_v3, usart_v4))]
+    {
+        let mut clear_idle = regs::Icr(0);
+        clear_idle.set_idle(true);
+        r.icr().write_value(clear_idle);
+    }
 
     r.cr1().modify(|w| w.set_idleie(true));
 
@@ -261,5 +273,22 @@ impl embedded_io_async::ErrorType for RingBufferedUartRx<'_> {
 impl embedded_io_async::Read for RingBufferedUartRx<'_> {
     async fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
         self.read(buf).await
+    }
+}
+
+impl ReadReady for RingBufferedUartRx<'_> {
+    fn read_ready(&mut self) -> Result<bool, Self::Error> {
+        let len = self.ring_buf.len().map_err(|e| match e {
+            crate::dma::ringbuffer::Error::Overrun => Self::Error::Overrun,
+            crate::dma::ringbuffer::Error::DmaUnsynced => {
+                error!(
+                    "Ringbuffer error: DmaUNsynced, driver implementation is 
+                    probably bugged please open an issue"
+                );
+                // we report this as overrun since its recoverable in the same way
+                Self::Error::Overrun
+            }
+        })?;
+        Ok(len > 0)
     }
 }
