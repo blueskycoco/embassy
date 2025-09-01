@@ -36,9 +36,9 @@ async fn main(spawner: Spawner) {
     let p = embassy_stm32::init(Default::default());
     info!("Hello World!");
 
-    unwrap!(spawner.spawn(blinky(p.PC13)));
+    spawner.spawn(unwrap!(blinky(p.PC13)));
 
-    let mut pwm_input = PwmInput::new(p.TIM2, p.PA0, Pull::None, khz(10));
+    let mut pwm_input = PwmInput::new_ch1(p.TIM2, p.PA0, Pull::None, khz(10));
     pwm_input.enable();
 
     loop {

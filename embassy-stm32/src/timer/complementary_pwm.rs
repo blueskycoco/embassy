@@ -2,17 +2,15 @@
 
 use core::marker::PhantomData;
 
-use stm32_metapac::timer::vals::Ckd;
+pub use stm32_metapac::timer::vals::{Ckd, Ossi, Ossr};
 
 use super::low_level::{CountingMode, OutputPolarity, Timer};
-use super::simple_pwm::{Ch1, Ch2, Ch3, Ch4, PwmPin};
-use super::{
-    AdvancedInstance4Channel, Channel, Channel1ComplementaryPin, Channel2ComplementaryPin, Channel3ComplementaryPin,
-    Channel4ComplementaryPin,
-};
+use super::simple_pwm::PwmPin;
+use super::{AdvancedInstance4Channel, Ch1, Ch2, Ch3, Ch4, Channel, TimerComplementaryPin};
 use crate::gpio::{AnyPin, OutputType};
 use crate::time::Hertz;
 use crate::timer::low_level::OutputCompareMode;
+use crate::timer::TimerChannel;
 use crate::Peri;
 
 /// Complementary PWM pin wrapper.
@@ -23,35 +21,35 @@ pub struct ComplementaryPwmPin<'d, T, C> {
     phantom: PhantomData<(T, C)>,
 }
 
-macro_rules! complementary_channel_impl {
-    ($new_chx:ident, $channel:ident, $pin_trait:ident) => {
-        impl<'d, T: AdvancedInstance4Channel> ComplementaryPwmPin<'d, T, $channel> {
-            #[doc = concat!("Create a new ", stringify!($channel), " complementary PWM pin instance.")]
-            pub fn $new_chx(pin: Peri<'d, impl $pin_trait<T>>, output_type: OutputType) -> Self {
-                critical_section::with(|_| {
-                    pin.set_low();
-                    pin.set_as_af(
-                        pin.af_num(),
-                        crate::gpio::AfType::output(output_type, crate::gpio::Speed::VeryHigh),
-                    );
-                });
-                ComplementaryPwmPin {
-                    _pin: pin.into(),
-                    phantom: PhantomData,
-                }
-            }
+impl<'d, T: AdvancedInstance4Channel, C: TimerChannel> ComplementaryPwmPin<'d, T, C> {
+    /// Create a new  complementary PWM pin instance.
+    pub fn new(pin: Peri<'d, impl TimerComplementaryPin<T, C>>, output_type: OutputType) -> Self {
+        critical_section::with(|_| {
+            pin.set_low();
+            pin.set_as_af(
+                pin.af_num(),
+                crate::gpio::AfType::output(output_type, crate::gpio::Speed::VeryHigh),
+            );
+        });
+        ComplementaryPwmPin {
+            _pin: pin.into(),
+            phantom: PhantomData,
         }
-    };
+    }
 }
-
-complementary_channel_impl!(new_ch1, Ch1, Channel1ComplementaryPin);
-complementary_channel_impl!(new_ch2, Ch2, Channel2ComplementaryPin);
-complementary_channel_impl!(new_ch3, Ch3, Channel3ComplementaryPin);
-complementary_channel_impl!(new_ch4, Ch4, Channel4ComplementaryPin);
 
 /// PWM driver with support for standard and complementary outputs.
 pub struct ComplementaryPwm<'d, T: AdvancedInstance4Channel> {
     inner: Timer<'d, T>,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+/// Determines which outputs are active when PWM is in idle mode
+pub enum IdlePolarity {
+    /// Normal channels are forced active and complementary channels are forced inactive
+    OisActive,
+    /// Normal channels are forced inactive and complementary channels are forced active
+    OisnActive,
 }
 
 impl<'d, T: AdvancedInstance4Channel> ComplementaryPwm<'d, T> {
@@ -88,8 +86,53 @@ impl<'d, T: AdvancedInstance4Channel> ComplementaryPwm<'d, T> {
                 this.inner.set_output_compare_mode(channel, OutputCompareMode::PwmMode1);
                 this.inner.set_output_compare_preload(channel, true);
             });
+        this.inner.set_autoreload_preload(true);
 
         this
+    }
+
+    /// Sets the idle output state for the given channels.
+    pub fn set_output_idle_state(&mut self, channels: &[Channel], polarity: IdlePolarity) {
+        let ois_active = matches!(polarity, IdlePolarity::OisActive);
+        for &channel in channels {
+            self.inner.set_ois(channel, ois_active);
+            self.inner.set_oisn(channel, !ois_active);
+        }
+    }
+
+    /// Set state of OSSI-bit in BDTR register
+    pub fn set_off_state_selection_idle(&mut self, val: Ossi) {
+        self.inner.set_ossi(val);
+    }
+
+    /// Get state of OSSI-bit in BDTR register
+    pub fn get_off_state_selection_idle(&self) -> Ossi {
+        self.inner.get_ossi()
+    }
+
+    /// Set state of OSSR-bit in BDTR register
+    pub fn set_off_state_selection_run(&mut self, val: Ossr) {
+        self.inner.set_ossr(val);
+    }
+
+    /// Get state of OSSR-bit in BDTR register
+    pub fn get_off_state_selection_run(&self) -> Ossr {
+        self.inner.get_ossr()
+    }
+
+    /// Trigger break input from software
+    pub fn trigger_software_break(&mut self, n: usize) {
+        self.inner.trigger_software_break(n);
+    }
+
+    /// Set Master Output Enable
+    pub fn set_master_output_enable(&mut self, enable: bool) {
+        self.inner.set_moe(enable);
+    }
+
+    /// Get Master Output Enable
+    pub fn get_master_output_enable(&self) -> bool {
+        self.inner.get_moe()
     }
 
     /// Enable the given channel.
@@ -121,7 +164,11 @@ impl<'d, T: AdvancedInstance4Channel> ComplementaryPwm<'d, T> {
     ///
     /// This value depends on the configured frequency and the timer's clock rate from RCC.
     pub fn get_max_duty(&self) -> u16 {
-        self.inner.get_max_compare_value() as u16 + 1
+        if self.inner.get_counting_mode().is_center_aligned() {
+            self.inner.get_max_compare_value() as u16
+        } else {
+            self.inner.get_max_compare_value() as u16 + 1
+        }
     }
 
     /// Set the duty for a given channel.
@@ -171,7 +218,11 @@ impl<'d, T: AdvancedInstance4Channel> embedded_hal_02::Pwm for ComplementaryPwm<
     }
 
     fn get_max_duty(&self) -> Self::Duty {
-        self.inner.get_max_compare_value() as u16 + 1
+        if self.inner.get_counting_mode().is_center_aligned() {
+            self.inner.get_max_compare_value() as u16
+        } else {
+            self.inner.get_max_compare_value() as u16 + 1
+        }
     }
 
     fn set_duty(&mut self, channel: Self::Channel, duty: Self::Duty) {
