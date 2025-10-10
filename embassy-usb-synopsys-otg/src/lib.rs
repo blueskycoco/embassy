@@ -93,6 +93,7 @@ pub unsafe fn on_interrupt<const MAX_EP_COUNT: usize>(r: Otg, state: &State<MAX_
                         r.fifo(0).read().data();
                     }
                 }
+                trace!("OUT_DATA_RX ep={} len={} done", ep_num, len);
             }
             vals::Pktstsd::OUT_DATA_DONE => {
                 trace!("OUT_DATA_DONE ep={}", ep_num);
@@ -102,7 +103,16 @@ pub unsafe fn on_interrupt<const MAX_EP_COUNT: usize>(r: Otg, state: &State<MAX_
             }
             x => trace!("unknown PKTSTS: {}", x.to_bits()),
         }
+
+        let grxstsp_stsphst = (status.0 >> 27usize) & 0x01;
+        if grxstsp_stsphst == 0x01 {
+            let mut ep_ints = r.doepint(0).read();
+            trace!("STSPHST bit set {:08x}", ep_ints.0);
+            ep_ints.0 = ep_ints.0 | 0x20;
+            r.doepint(0).write_value(ep_ints);
+        }
     }
+
 
     // IN endpoint interrupt
     if ints.iepint() {
@@ -1292,7 +1302,7 @@ impl<'d> embassy_usb_driver::ControlPipe for ControlPipe<'d> {
                 trace!("SETUP received: {:?}", Bytes(&data));
                 Poll::Ready(data)
             } else {
-                trace!("SETUP waiting");
+                //trace!("SETUP waiting");
                 Poll::Pending
             }
         })

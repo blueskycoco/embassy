@@ -96,9 +96,10 @@ pub(crate) unsafe fn blocking_erase_sector(sector: &FlashSector) -> Result<(), E
     #[cfg(any(flash_wl, flash_wb, flash_l4, flash_l5))]
     {
         let idx = (sector.start - super::FLASH_BASE as u32) / super::BANK1_REGION.erase_size as u32;
+        trace!("erase1 {}, {} {}", sector.start, super::FLASH_BASE, super::BANK1_REGION.erase_size);
 
         #[cfg(flash_l4)]
-        let (idx, bank) = if idx > 255 { (idx - 256, true) } else { (idx, false) };
+        let (idx, bank) = if idx > 127 { (idx - 128, true) } else { (idx, false) };
 
         #[cfg(flash_l5)]
         let (idx, bank) = if pac::FLASH.optr().read().dbank() {
@@ -111,6 +112,7 @@ pub(crate) unsafe fn blocking_erase_sector(sector: &FlashSector) -> Result<(), E
             (idx, None)
         };
 
+        trace!("erase2 {}, {}", idx, bank);
         #[cfg(not(flash_l5))]
         pac::FLASH.cr().modify(|w| {
             w.set_per(true);
@@ -171,28 +173,34 @@ pub(crate) unsafe fn wait_ready_blocking() -> Result<(), Error> {
             if !sr.bsy() {
                 #[cfg(any(flash_wl, flash_wb, flash_l4))]
                 if sr.progerr() {
+    trace!("write progerr");
                     return Err(Error::Prog);
                 }
 
                 if sr.wrperr() {
+    trace!("write wrperr");
                     return Err(Error::Protected);
                 }
 
                 if sr.pgaerr() {
+    trace!("write pgaerr");
                     return Err(Error::Unaligned);
                 }
 
                 if sr.sizerr() {
+    trace!("write sizerr");
                     return Err(Error::Size);
                 }
 
                 #[cfg(any(flash_wl, flash_wb, flash_l4))]
                 if sr.miserr() {
+    trace!("write miserr");
                     return Err(Error::Miss);
                 }
 
                 #[cfg(any(flash_wl, flash_wb, flash_l4))]
                 if sr.pgserr() {
+    trace!("write pgserr");
                     return Err(Error::Seq);
                 }
 
