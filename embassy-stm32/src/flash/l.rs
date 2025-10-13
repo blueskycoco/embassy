@@ -96,7 +96,7 @@ pub(crate) unsafe fn blocking_erase_sector(sector: &FlashSector) -> Result<(), E
     #[cfg(any(flash_wl, flash_wb, flash_l4, flash_l5))]
     {
         let idx = (sector.start - super::FLASH_BASE as u32) / super::BANK1_REGION.erase_size as u32;
-        trace!("erase1 {}, {} {}", sector.start, super::FLASH_BASE, super::BANK1_REGION.erase_size);
+        //trace!("erase1 0x{:x}, 0x{:x} {}", sector.start, super::FLASH_BASE, super::BANK1_REGION.erase_size);
 
         #[cfg(flash_l4)]
         let (idx, bank) = if idx > 127 { (idx - 128, true) } else { (idx, false) };
@@ -112,7 +112,7 @@ pub(crate) unsafe fn blocking_erase_sector(sector: &FlashSector) -> Result<(), E
             (idx, None)
         };
 
-        trace!("erase2 {}, {}", idx, bank);
+        //trace!("erase2 {}, {}", idx, bank);
         #[cfg(not(flash_l5))]
         pac::FLASH.cr().modify(|w| {
             w.set_per(true);
