@@ -1,7 +1,33 @@
 #![no_std]
 #![allow(async_fn_in_trait)]
+#![allow(unsafe_op_in_unsafe_fn)]
 #![doc = include_str!("../README.md")]
 #![warn(missing_docs)]
+
+pub mod host;
+
+/// Speed of a device or port
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub enum Speed {
+    /// 1.5 Mbit/s
+    Low,
+    /// 12 Mbit/s
+    Full,
+    /// 480 Mbit/s
+    High,
+}
+
+impl Speed {
+    /// Provides the default max_packet_size for a given port speed
+    pub const fn max_packet_size(self) -> u16 {
+        match self {
+            Speed::Low => 8,
+            Speed::Full => 64,
+            Speed::High => 64, // USB 2.0 spec requires 64 for high-speed control EP0
+        }
+    }
+}
 
 /// Direction of USB traffic. Note that in the USB standard the direction is always indicated from
 /// the perspective of the host, which is backward for devices, but the standard directions are used
@@ -205,7 +231,7 @@ pub trait Bus {
     ///
     /// # Errors
     ///
-    /// * [`Unsupported`](crate::Unsupported) - This UsbBus implementation doesn't support
+    /// * [`Unsupported`] - This UsbBus implementation doesn't support
     ///   simulating a disconnect or it has not been enabled at creation time.
     fn force_reset(&mut self) -> Result<(), Unsupported> {
         Err(Unsupported)
@@ -215,12 +241,14 @@ pub trait Bus {
     ///
     /// # Errors
     ///
-    /// * [`Unsupported`](crate::Unsupported) - This UsbBus implementation doesn't support
+    /// * [`Unsupported`] - This UsbBus implementation doesn't support
     ///   remote wakeup or it has not been enabled at creation time.
     async fn remote_wakeup(&mut self) -> Result<(), Unsupported>;
 }
 
 /// Endpoint trait, common for OUT and IN.
+/// Endpoint is a buffer on a device that stores rx/tx data.
+/// Endpoint can be thought of as one end of a pipe/channel.
 pub trait Endpoint {
     /// Get the endpoint address
     fn info(&self) -> &EndpointInfo;
@@ -236,6 +264,22 @@ pub trait EndpointOut: Endpoint {
     ///
     /// This should also clear any NAK flags and prepare the endpoint to receive the next packet.
     async fn read(&mut self, buf: &mut [u8]) -> Result<usize, EndpointError>;
+
+    /// Read until the buffer is full or we receive a short packet from the USB host returning the
+    /// actual length of the entire data block.
+    ///
+    /// This should also clear any NAK flags and prepare the endpoint to receive the next packet or
+    /// data block.
+    async fn read_transfer(&mut self, buf: &mut [u8]) -> Result<usize, EndpointError> {
+        let mut n = 0;
+        loop {
+            let i = self.read(&mut buf[n..]).await?;
+            n += i;
+            if i < self.info().max_packet_size as usize {
+                return Ok(n);
+            }
+        }
+    }
 }
 
 /// USB control pipe trait.
@@ -349,6 +393,20 @@ pub trait ControlPipe {
 pub trait EndpointIn: Endpoint {
     /// Write a single packet of data to the endpoint.
     async fn write(&mut self, buf: &[u8]) -> Result<(), EndpointError>;
+
+    /// Write all the data from buf to the endpoint one wMaxPacketSize chunk at a time.
+    ///
+    /// If the buffer size is evenly divisible by wMaxPacketSize, this will also ensure the
+    /// terminating zero-length-packet is transmitted.
+    async fn write_transfer(&mut self, buf: &[u8], needs_zlp: bool) -> Result<(), EndpointError> {
+        for chunk in buf.chunks(self.info().max_packet_size as usize) {
+            self.write(chunk).await?;
+        }
+        if needs_zlp && buf.len() % self.info().max_packet_size as usize == 0 {
+            self.write(&[]).await?;
+        }
+        Ok(())
+    }
 }
 
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
@@ -398,6 +456,7 @@ pub enum EndpointError {
     Disabled,
 }
 
+// TODO: remove before releasing embassy-usb-driver v0.3
 impl embedded_io_async::Error for EndpointError {
     fn kind(&self) -> embedded_io_async::ErrorKind {
         match self {
@@ -406,3 +465,13 @@ impl embedded_io_async::Error for EndpointError {
         }
     }
 }
+
+impl core::fmt::Display for EndpointError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::BufferOverflow => write!(f, "Buffer overflow"),
+            Self::Disabled => write!(f, "Endpoint disabled"),
+        }
+    }
+}
+impl core::error::Error for EndpointError {}

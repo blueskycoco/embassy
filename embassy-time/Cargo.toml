@@ -1,7 +1,7 @@
 [package]
 name = "embassy-time"
-version = "0.5.0"
-edition = "2021"
+version = "0.5.1"
+edition = "2024"
 description = "Instant and Duration for embedded no-std systems, with async timer support"
 repository = "https://github.com/embassy-rs/embassy"
 documentation = "https://docs.embassy.dev/embassy-time"
@@ -17,6 +17,8 @@ categories = [
 [package.metadata.embassy]
 build = [
     {target = "thumbv6m-none-eabi", features = ["defmt", "defmt-timestamp-uptime", "mock-driver"]},
+    # Xtensa builds
+    {group = "xtensa", build-std = ["core", "alloc"],  target = "xtensa-esp32s2-none-elf", features = ["defmt", "defmt-timestamp-uptime", "mock-driver"]},
 ]
 
 [package.metadata.embassy_docs]
@@ -29,6 +31,11 @@ target = "x86_64-unknown-linux-gnu"
 features = ["defmt", "std"]
 
 [features]
+## Enable defmt
+defmt = ["dep:defmt"]
+## Enable log  
+log = ["dep:log"]
+
 ## Display the time since startup next to defmt log messages.
 ## At most 1 `defmt-timestamp-uptime-*` feature can be used.
 ## `defmt-timestamp-uptime` is provided for backwards compatibility (provides the same format as `uptime-us`).
@@ -171,6 +178,8 @@ tick-hz-256_000 = ["embassy-time-driver/tick-hz-256_000"]
 tick-hz-262_144 = ["embassy-time-driver/tick-hz-262_144"]
 ## 320.0kHz Tick Rate
 tick-hz-320_000 = ["embassy-time-driver/tick-hz-320_000"]
+## 375.0kHz Tick Rate
+tick-hz-375_000 = ["embassy-time-driver/tick-hz-375_000"]
 ## 512.0kHz Tick Rate
 tick-hz-512_000 = ["embassy-time-driver/tick-hz-512_000"]
 ## 524.288kHz Tick Rate
@@ -422,7 +431,7 @@ tick-hz-5_242_880_000 = ["embassy-time-driver/tick-hz-5_242_880_000"]
 #! </details>
 
 [dependencies]
-embassy-time-driver = { version = "0.2.1", path = "../embassy-time-driver" }
+embassy-time-driver = { version = "0.2.2", path = "../embassy-time-driver" }
 embassy-time-queue-utils = { version = "0.3.0", path = "../embassy-time-queue-utils", optional = true}
 
 defmt = { version = "1.0.1", optional = true }
@@ -446,4 +455,4 @@ wasm-timer = { version = "0.2.5", optional = true }
 [dev-dependencies]
 serial_test = "0.9"
 critical-section = { version = "1.1", features = ["std"] }
-embassy-executor = { version = "0.9.0", path = "../embassy-executor" }
+embassy-executor = { version = "0.10.0", path = "../embassy-executor" }

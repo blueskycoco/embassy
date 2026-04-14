@@ -2,18 +2,18 @@ use core::marker::PhantomData;
 
 use embassy_hal_internal::PeripheralType;
 use embassy_usb_driver::{EndpointAddress, EndpointAllocError, EndpointType, Event, Unsupported};
-use embassy_usb_synopsys_otg::otg_v1::vals::Dspd;
-use embassy_usb_synopsys_otg::otg_v1::Otg;
 pub use embassy_usb_synopsys_otg::Config;
+use embassy_usb_synopsys_otg::otg_v1::Otg;
+use embassy_usb_synopsys_otg::otg_v1::vals::Dspd;
 use embassy_usb_synopsys_otg::{
-    on_interrupt as on_interrupt_impl, Bus as OtgBus, ControlPipe, Driver as OtgDriver, Endpoint, In, OtgInstance, Out,
-    PhyType, State,
+    Bus as OtgBus, ControlPipe, Driver as OtgDriver, Endpoint, In, OtgInstance, Out, PhyType, State,
+    on_interrupt as on_interrupt_impl,
 };
 
 use crate::gpio::{AfType, OutputType, Speed};
 use crate::interrupt::typelevel::Interrupt;
 use crate::rcc::{self, RccPeripheral};
-use crate::{interrupt, Peri};
+use crate::{Peri, interrupt};
 
 const MAX_EP_COUNT: usize = 9;
 
@@ -34,7 +34,7 @@ macro_rules! config_ulpi_pins {
     ($($pin:ident),*) => {
                 critical_section::with(|_| {
             $(
-                $pin.set_as_af($pin.af_num(), AfType::output(OutputType::PushPull, Speed::VeryHigh));
+                set_as_af!($pin, AfType::output(OutputType::PushPull, Speed::VeryHigh));
             )*
         })
     };
@@ -68,8 +68,13 @@ impl<'d, T: Instance> Driver<'d, T> {
         ep_out_buffer: &'d mut [u8],
         config: Config,
     ) -> Self {
-        dp.set_as_af(dp.af_num(), AfType::output(OutputType::PushPull, Speed::VeryHigh));
-        dm.set_as_af(dm.af_num(), AfType::output(OutputType::PushPull, Speed::VeryHigh));
+        #[cfg(usb_alternate_function)]
+        {
+            set_as_af!(dp, AfType::output(OutputType::PushPull, Speed::VeryHigh));
+            set_as_af!(dm, AfType::output(OutputType::PushPull, Speed::VeryHigh));
+        }
+        #[cfg(not(usb_alternate_function))]
+        let _ = (dp, dm);
 
         let regs = T::regs();
 
@@ -99,17 +104,18 @@ impl<'d, T: Instance> Driver<'d, T> {
     pub fn new_hs(
         _peri: Peri<'d, T>,
         _irq: impl interrupt::typelevel::Binding<T::Interrupt, InterruptHandler<T>> + 'd,
-        _dp: Peri<'d, impl DpPin<T>>,
-        _dm: Peri<'d, impl DmPin<T>>,
+        dp: Peri<'d, impl DpPin<T>>,
+        dm: Peri<'d, impl DmPin<T>>,
         ep_out_buffer: &'d mut [u8],
         config: Config,
     ) -> Self {
-        // For STM32U5 High speed pins need to be left in analog mode
-        #[cfg(not(any(all(stm32u5, peri_usb_otg_hs), all(stm32wba, peri_usb_otg_hs))))]
+        #[cfg(usb_alternate_function)]
         {
-            _dp.set_as_af(_dp.af_num(), AfType::output(OutputType::PushPull, Speed::VeryHigh));
-            _dm.set_as_af(_dm.af_num(), AfType::output(OutputType::PushPull, Speed::VeryHigh));
+            set_as_af!(dp, AfType::output(OutputType::PushPull, Speed::VeryHigh));
+            set_as_af!(dm, AfType::output(OutputType::PushPull, Speed::VeryHigh));
         }
+        #[cfg(not(usb_alternate_function))]
+        let _ = (dp, dm);
 
         let instance = OtgInstance {
             regs: T::regs(),
@@ -571,6 +577,181 @@ foreach_interrupt!(
         }
     };
 );
+
+// ======== USB Host Mode ========
+
+#[cfg(feature = "usb-host")]
+mod host_impl {
+    use core::marker::PhantomData;
+
+    use embassy_usb_synopsys_otg::PhyType;
+    use embassy_usb_synopsys_otg::host::{
+        HostState, OtgHost as OtgHostDriver, OtgHostInstance, on_host_interrupt as on_host_interrupt_impl,
+    };
+
+    use super::*;
+
+    const MAX_HOST_CH_COUNT: usize = 12;
+
+    /// Per-instance host state, analogous to `SealedInstance::state()` for device mode.
+    #[allow(private_bounds)]
+    pub(super) trait SealedHostInstance: Instance {
+        fn host_state() -> &'static HostState<MAX_HOST_CH_COUNT>;
+    }
+
+    foreach_interrupt!(
+        (USB_OTG_FS, otg, $block:ident, GLOBAL, $irq:ident) => {
+            impl SealedHostInstance for crate::peripherals::USB_OTG_FS {
+                fn host_state() -> &'static HostState<MAX_HOST_CH_COUNT> {
+                    static STATE: HostState<MAX_HOST_CH_COUNT> = HostState::new();
+                    &STATE
+                }
+            }
+        };
+        (USB_OTG_HS, otg, $block:ident, GLOBAL, $irq:ident) => {
+            impl SealedHostInstance for crate::peripherals::USB_OTG_HS {
+                fn host_state() -> &'static HostState<MAX_HOST_CH_COUNT> {
+                    static STATE: HostState<MAX_HOST_CH_COUNT> = HostState::new();
+                    &STATE
+                }
+            }
+        };
+    );
+
+    /// USB host interrupt handler.
+    #[allow(private_bounds)]
+    pub struct HostInterruptHandler<T: SealedHostInstance> {
+        _phantom: PhantomData<T>,
+    }
+
+    impl<T: SealedHostInstance> interrupt::typelevel::Handler<T::Interrupt> for HostInterruptHandler<T> {
+        unsafe fn on_interrupt() {
+            let r = T::regs();
+            let state = T::host_state();
+            on_host_interrupt_impl(r, state, T::ENDPOINT_COUNT.min(MAX_HOST_CH_COUNT));
+        }
+    }
+
+    /// USB host driver.
+    #[allow(private_interfaces, private_bounds)]
+    pub struct HostDriver<'d, T: SealedHostInstance> {
+        phantom: PhantomData<&'d mut T>,
+        inner: OtgHostDriver<'d, MAX_HOST_CH_COUNT>,
+    }
+
+    #[allow(private_bounds)]
+    impl<'d, T: SealedHostInstance> HostDriver<'d, T> {
+        /// Initializes USB OTG peripheral in host mode with internal Full-Speed PHY.
+        pub fn new_fs_host(
+            _peri: crate::Peri<'d, T>,
+            _irq: impl interrupt::typelevel::Binding<T::Interrupt, HostInterruptHandler<T>> + 'd,
+            dp: crate::Peri<'d, impl DpPin<T>>,
+            dm: crate::Peri<'d, impl DmPin<T>>,
+        ) -> Self {
+            #[cfg(usb_alternate_function)]
+            {
+                set_as_af!(dp, AfType::output(OutputType::PushPull, Speed::VeryHigh));
+                set_as_af!(dm, AfType::output(OutputType::PushPull, Speed::VeryHigh));
+            }
+            #[cfg(not(usb_alternate_function))]
+            let _ = (dp, dm);
+
+            super::super::common_init::<T>();
+
+            let instance = OtgHostInstance {
+                regs: T::regs(),
+                state: T::host_state(),
+                fifo_depth_words: T::FIFO_DEPTH_WORDS,
+                channel_count: T::ENDPOINT_COUNT.min(MAX_HOST_CH_COUNT),
+                phy_type: PhyType::InternalFullSpeed,
+            };
+
+            Self {
+                inner: OtgHostDriver::new(instance),
+                phantom: PhantomData,
+            }
+        }
+
+        /// Initializes USB OTG peripheral in host mode with internal High-Speed PHY.
+        pub fn new_hs_host(
+            _peri: crate::Peri<'d, T>,
+            _irq: impl interrupt::typelevel::Binding<T::Interrupt, HostInterruptHandler<T>> + 'd,
+            dp: crate::Peri<'d, impl DpPin<T>>,
+            dm: crate::Peri<'d, impl DmPin<T>>,
+        ) -> Self {
+            #[cfg(usb_alternate_function)]
+            {
+                set_as_af!(dp, AfType::output(OutputType::PushPull, Speed::VeryHigh));
+                set_as_af!(dm, AfType::output(OutputType::PushPull, Speed::VeryHigh));
+            }
+            #[cfg(not(usb_alternate_function))]
+            let _ = (dp, dm);
+
+            super::super::common_init::<T>();
+
+            // Enable HS PHY clock and configure PHY for WBA devices.
+            #[cfg(all(stm32wba, peri_usb_otg_hs))]
+            {
+                critical_section::with(|_| {
+                    crate::pac::RCC.ahb2enr().modify(|w| {
+                        w.set_usb_otg_hs_phyen(true);
+                    });
+                });
+
+                crate::pac::SYSCFG.otghsphytuner2().modify(|w| {
+                    w.set_compdistune(0b010);
+                    w.set_sqrxtune(0b000);
+                });
+
+                crate::pac::SYSCFG.otghsphycr().modify(|w| {
+                    w.set_en(true);
+                });
+            }
+
+            let instance = OtgHostInstance {
+                regs: T::regs(),
+                state: T::host_state(),
+                fifo_depth_words: T::FIFO_DEPTH_WORDS,
+                channel_count: T::ENDPOINT_COUNT.min(MAX_HOST_CH_COUNT),
+                phy_type: PhyType::InternalHighSpeed,
+            };
+
+            Self {
+                inner: OtgHostDriver::new(instance),
+                phantom: PhantomData,
+            }
+        }
+    }
+
+    #[allow(private_bounds)]
+    impl<'d, T: SealedHostInstance> embassy_usb_driver::host::UsbHostDriver for HostDriver<'d, T> {
+        type Channel<Ty: embassy_usb_driver::host::channel::Type, D: embassy_usb_driver::host::channel::Direction> =
+            <OtgHostDriver<'d, MAX_HOST_CH_COUNT> as embassy_usb_driver::host::UsbHostDriver>::Channel<Ty, D>;
+
+        async fn wait_for_device_event(&self) -> embassy_usb_driver::host::DeviceEvent {
+            self.inner.wait_for_device_event().await
+        }
+
+        async fn bus_reset(&self) {
+            self.inner.bus_reset().await
+        }
+
+        fn alloc_channel<
+            Ty: embassy_usb_driver::host::channel::Type,
+            D: embassy_usb_driver::host::channel::Direction,
+        >(
+            &self,
+            addr: u8,
+            endpoint: &embassy_usb_driver::EndpointInfo,
+            pre: bool,
+        ) -> Result<Self::Channel<Ty, D>, embassy_usb_driver::host::HostError> {
+            self.inner.alloc_channel(addr, endpoint, pre)
+        }
+    }
+}
+
+#[cfg(feature = "usb-host")]
+pub use host_impl::*;
 
 fn calculate_trdt<T: Instance>(speed: Dspd) -> u8 {
     let ahb_freq = T::bus_frequency().0;

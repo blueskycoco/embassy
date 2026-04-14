@@ -1085,7 +1085,7 @@ impl<'d, T: Instance, M: Mode> Cryp<'d, T, M> {
         T::regs().init(1).ivrr().write_value(u32::from_be_bytes(iv_word));
 
         // Flush in/out FIFOs
-        T::regs().cr().modify(|w| w.fflush());
+        T::regs().cr().modify(|w| w.set_fflush(true));
 
         ctx.cipher.init_phase_blocking(T::regs(), self);
 
@@ -1150,7 +1150,7 @@ impl<'d, T: Instance, M: Mode> Cryp<'d, T, M> {
                 ctx.aad_complete = true;
                 T::regs().cr().modify(|w| w.set_crypen(false));
                 T::regs().cr().modify(|w| w.set_gcm_ccmph(2));
-                T::regs().cr().modify(|w| w.fflush());
+                T::regs().cr().modify(|w| w.set_fflush(true));
             } else {
                 // Just return because we don't yet have a full block to process.
                 return;
@@ -1185,7 +1185,7 @@ impl<'d, T: Instance, M: Mode> Cryp<'d, T, M> {
             ctx.aad_complete = true;
             T::regs().cr().modify(|w| w.set_crypen(false));
             T::regs().cr().modify(|w| w.set_gcm_ccmph(2));
-            T::regs().cr().modify(|w| w.fflush());
+            T::regs().cr().modify(|w| w.set_fflush(true));
         }
 
         self.store_context(ctx);
@@ -1219,7 +1219,7 @@ impl<'d, T: Instance, M: Mode> Cryp<'d, T, M> {
                 ctx.aad_complete = true;
                 T::regs().cr().modify(|w| w.set_crypen(false));
                 T::regs().cr().modify(|w| w.set_gcm_ccmph(2));
-                T::regs().cr().modify(|w| w.fflush());
+                T::regs().cr().modify(|w| w.set_fflush(true));
                 T::regs().cr().modify(|w| w.set_crypen(true));
             }
         }
@@ -1236,7 +1236,10 @@ impl<'d, T: Instance, M: Mode> Cryp<'d, T, M> {
         }
         if C::REQUIRES_PADDING {
             if last_block_remainder != 0 {
-                panic!("Input must be a multiple of {} bytes in ECB and CBC modes. Consider padding or ciphertext stealing.", C::BLOCK_SIZE);
+                panic!(
+                    "Input must be a multiple of {} bytes in ECB and CBC modes. Consider padding or ciphertext stealing.",
+                    C::BLOCK_SIZE
+                );
             }
         }
         if last_block {
@@ -1458,18 +1461,21 @@ impl<'d, T: Instance, M: Mode> Cryp<'d, T, M> {
 
 impl<'d, T: Instance> Cryp<'d, T, Async> {
     /// Create a new CRYP driver.
-    pub fn new(
+    pub fn new<D1: DmaIn<T>, D2: DmaOut<T>>(
         peri: Peri<'d, T>,
-        indma: Peri<'d, impl DmaIn<T>>,
-        outdma: Peri<'d, impl DmaOut<T>>,
-        _irq: impl interrupt::typelevel::Binding<T::Interrupt, InterruptHandler<T>> + 'd,
+        indma: Peri<'d, D1>,
+        outdma: Peri<'d, D2>,
+        _irq: impl interrupt::typelevel::Binding<T::Interrupt, InterruptHandler<T>>
+        + interrupt::typelevel::Binding<D1::Interrupt, crate::dma::InterruptHandler<D1>>
+        + interrupt::typelevel::Binding<D2::Interrupt, crate::dma::InterruptHandler<D2>>
+        + 'd,
     ) -> Self {
         rcc::enable_and_reset::<T>();
         let instance = Self {
             _peripheral: peri,
             _phantom: PhantomData,
-            indma: new_dma!(indma),
-            outdma: new_dma!(outdma),
+            indma: new_dma!(indma, _irq),
+            outdma: new_dma!(outdma, _irq),
         };
 
         T::Interrupt::unpend();
@@ -1548,7 +1554,7 @@ impl<'d, T: Instance> Cryp<'d, T, Async> {
         T::regs().init(1).ivrr().write_value(u32::from_be_bytes(iv_word));
 
         // Flush in/out FIFOs
-        T::regs().cr().modify(|w| w.fflush());
+        T::regs().cr().modify(|w| w.set_fflush(true));
 
         ctx.cipher.init_phase(T::regs(), self).await;
 
@@ -1612,7 +1618,7 @@ impl<'d, T: Instance> Cryp<'d, T, Async> {
                 ctx.aad_complete = true;
                 T::regs().cr().modify(|w| w.set_crypen(false));
                 T::regs().cr().modify(|w| w.set_gcm_ccmph(2));
-                T::regs().cr().modify(|w| w.fflush());
+                T::regs().cr().modify(|w| w.set_fflush(true));
             } else {
                 // Just return because we don't yet have a full block to process.
                 return;
@@ -1652,7 +1658,7 @@ impl<'d, T: Instance> Cryp<'d, T, Async> {
             ctx.aad_complete = true;
             T::regs().cr().modify(|w| w.set_crypen(false));
             T::regs().cr().modify(|w| w.set_gcm_ccmph(2));
-            T::regs().cr().modify(|w| w.fflush());
+            T::regs().cr().modify(|w| w.set_fflush(true));
         }
 
         self.store_context(ctx);
@@ -1686,7 +1692,7 @@ impl<'d, T: Instance> Cryp<'d, T, Async> {
                 ctx.aad_complete = true;
                 T::regs().cr().modify(|w| w.set_crypen(false));
                 T::regs().cr().modify(|w| w.set_gcm_ccmph(2));
-                T::regs().cr().modify(|w| w.fflush());
+                T::regs().cr().modify(|w| w.set_fflush(true));
                 T::regs().cr().modify(|w| w.set_crypen(true));
             }
         }
@@ -1703,7 +1709,10 @@ impl<'d, T: Instance> Cryp<'d, T, Async> {
         }
         if C::REQUIRES_PADDING {
             if last_block_remainder != 0 {
-                panic!("Input must be a multiple of {} bytes in ECB and CBC modes. Consider padding or ciphertext stealing.", C::BLOCK_SIZE);
+                panic!(
+                    "Input must be a multiple of {} bytes in ECB and CBC modes. Consider padding or ciphertext stealing.",
+                    C::BLOCK_SIZE
+                );
             }
         }
         if last_block {
@@ -1814,7 +1823,6 @@ impl<'d, T: Instance> Cryp<'d, T, Async> {
         // Configure DMA to transfer input to crypto core.
         let dst_ptr: *mut u32 = T::regs().din().as_ptr();
         let options = TransferOptions {
-            #[cfg(not(gpdma))]
             priority: crate::dma::Priority::High,
             ..Default::default()
         };
@@ -1834,7 +1842,6 @@ impl<'d, T: Instance> Cryp<'d, T, Async> {
         // Configure DMA to transfer input to crypto core.
         let dst_ptr: *mut u32 = T::regs().din().as_ptr();
         let options = TransferOptions {
-            #[cfg(not(gpdma))]
             priority: crate::dma::Priority::High,
             ..Default::default()
         };
@@ -1853,7 +1860,6 @@ impl<'d, T: Instance> Cryp<'d, T, Async> {
         // Configure DMA to get output from crypto core.
         let src_ptr = T::regs().dout().as_ptr();
         let options = TransferOptions {
-            #[cfg(not(gpdma))]
             priority: crate::dma::Priority::VeryHigh,
             ..Default::default()
         };

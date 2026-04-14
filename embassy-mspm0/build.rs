@@ -1,5 +1,5 @@
 use std::cmp::Ordering;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 use std::fmt::Write;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -16,21 +16,22 @@ use quote::{format_ident, quote};
 mod common;
 
 fn main() {
-    generate_code();
-    interrupt_group_linker_magic();
-}
-
-fn generate_code() {
     let mut cfgs = common::CfgSet::new();
     common::set_target_cfgs(&mut cfgs);
 
+    generate_code(&mut cfgs);
+    select_gpio_features(&mut cfgs);
+    interrupt_group_linker_magic();
+}
+
+fn generate_code(cfgs: &mut CfgSet) {
     #[cfg(any(feature = "rt"))]
     println!(
         "cargo:rustc-link-search={}",
         PathBuf::from(env::var_os("OUT_DIR").unwrap()).display(),
     );
 
-    cfgs.declare_all(&["gpio_pb", "gpio_pc", "int_group1"]);
+    cfgs.declare_all(&["gpio_pb", "gpio_pc", "int_group1", "unicomm"]);
 
     let chip_name = match env::vars()
         .map(|(a, _)| a)
@@ -53,9 +54,10 @@ fn generate_code() {
         cfgs.declare_all(&get_chip_cfgs(&chip));
     }
 
-    let mut singletons = get_singletons(&mut cfgs);
+    let mut singletons = get_singletons(cfgs);
 
-    time_driver(&mut singletons, &mut cfgs);
+    time_driver(&mut singletons, cfgs);
+    pin_features(&mut singletons);
 
     let mut g = TokenStream::new();
 
@@ -68,6 +70,7 @@ fn generate_code() {
     g.extend(generate_pin_trait_impls());
     g.extend(generate_groups());
     g.extend(generate_dma_channel_count());
+    g.extend(generate_adc_constants(cfgs));
 
     let out_dir = &PathBuf::from(env::var_os("OUT_DIR").unwrap());
     let out_file = out_dir.join("_generated.rs").to_string_lossy().to_string();
@@ -79,8 +82,12 @@ fn get_chip_cfgs(chip_name: &str) -> Vec<String> {
     let mut cfgs = Vec::new();
 
     // GPIO on C110x is special as it does not belong to an interrupt group.
-    if chip_name.starts_with("mspm0c110") || chip_name.starts_with("msps003f") {
+    if chip_name.starts_with("mspm0c1103") || chip_name.starts_with("mspm0c1104") || chip_name.starts_with("msps003f") {
         cfgs.push("mspm0c110x".to_string());
+    }
+
+    if chip_name.starts_with("mspm0c1105") || chip_name.starts_with("mspm0c1106") {
+        cfgs.push("mspm0c1105_c1106".to_string());
     }
 
     // Family ranges (temporary until int groups are generated)
@@ -108,6 +115,14 @@ fn get_chip_cfgs(chip_name: &str) -> Vec<String> {
 
     if chip_name.starts_with("mspm0g351") {
         cfgs.push("mspm0g351x".to_string());
+    }
+
+    if chip_name.starts_with("mspm0g518") {
+        cfgs.push("mspm0g518x".to_string());
+    }
+
+    if chip_name.starts_with("mspm0h321") {
+        cfgs.push("mspm0h321x".to_string());
     }
 
     if chip_name.starts_with("mspm0l110") {
@@ -184,8 +199,15 @@ fn generate_groups() -> TokenStream {
                 use crate::pac::#group_enum;
 
                 let group = crate::pac::CPUSS.int_group(#group_number);
-                // MUST subtract by 1 since 0 is NO_INTR
-                let iidx = group.iidx().read().stat().to_bits() - 1;
+                let stat = group.iidx().read().stat();
+
+                // check for spurious interrupts
+                if stat == crate::pac::cpuss::vals::Iidx::NO_INTR {
+                    return;
+                }
+
+                // MUST subtract by 1 because NO_INTR offsets IIDX values.
+                let iidx = stat.to_bits() - 1;
 
                 let Ok(group) = #group_enum::try_from(iidx as u8) else {
                     return;
@@ -203,7 +225,7 @@ fn generate_groups() -> TokenStream {
 
         #[cfg(feature = "rt")]
         mod group_vectors {
-            extern "Rust" {
+            unsafe extern "Rust" {
                 #(#group_vectors)*
             }
         }
@@ -216,10 +238,27 @@ fn generate_dma_channel_count() -> TokenStream {
     quote! { pub const DMA_CHANNELS: usize = #count; }
 }
 
+fn generate_adc_constants(cfgs: &mut CfgSet) -> TokenStream {
+    let vrsel = METADATA.adc_vrsel;
+    let memctl = METADATA.adc_memctl;
+
+    cfgs.declare("adc_neg_vref");
+    match vrsel {
+        3 => (),
+        5 => cfgs.enable("adc_neg_vref"),
+        _ => panic!("Unsupported ADC VRSEL value: {vrsel}"),
+    }
+    quote! {
+        pub const ADC_VRSEL: u8 = #vrsel;
+        pub const ADC_MEMCTL: u8 = #memctl;
+    }
+}
+
 #[derive(Debug, Clone)]
 struct Singleton {
     name: String,
 
+    /// `#[cfg]` guard which enables this singleton instance to be obtained.
     cfg: Option<TokenStream>,
 }
 
@@ -267,6 +306,15 @@ fn get_singletons(cfgs: &mut common::CfgSet) -> Vec<Singleton> {
             // by the HAL.
             "iomux" | "cpuss" => true,
 
+            // Unicomm instances get their own singletons, but we need to enable a cfg for unicomm drivers.
+            "unicomm" => {
+                cfgs.enable("unicomm");
+                false
+            }
+
+            // TODO: Remove after TIMB is fixed
+            "tim" if peripheral.name.starts_with("TIMB") => true,
+
             _ => false,
         };
 
@@ -277,26 +325,13 @@ fn get_singletons(cfgs: &mut common::CfgSet) -> Vec<Singleton> {
             });
         }
 
-        let mut signals = BTreeSet::new();
-
-        // Pick out each unique signal. There may be multiple instances of each signal due to
-        // iomux mappings.
-        for pin in peripheral.pins {
-            let signal = if peripheral.name.starts_with("GPIO")
-                || peripheral.name.starts_with("VREF")
-                || peripheral.name.starts_with("RTC")
-            {
-                pin.signal.to_string()
-            } else {
-                format!("{}_{}", peripheral.name, pin.signal)
-            };
-
-            // We need to rename some signals to become valid Rust identifiers.
-            let signal = make_valid_identifier(&signal);
-            signals.insert(signal);
+        // Generate each GPIO pin singleton
+        if peripheral.name.starts_with("GPIO") {
+            for pin in peripheral.pins {
+                let singleton = make_valid_identifier(&pin.signal);
+                singletons.push(singleton);
+            }
         }
-
-        singletons.extend(signals);
     }
 
     // DMA channels get their own singletons
@@ -390,6 +425,8 @@ fn time_driver(singletons: &mut Vec<Singleton>, cfgs: &mut CfgSet) {
     // Verify the selected timer is available
     let selected_timer = match time_driver.as_ref().map(|x| x.as_ref()) {
         None => "",
+        // TODO: Fix TIMB0
+        // Some("timb0") => "TIMB0",
         Some("timg0") => "TIMG0",
         Some("timg1") => "TIMG1",
         Some("timg2") => "TIMG2",
@@ -407,16 +444,17 @@ fn time_driver(singletons: &mut Vec<Singleton>, cfgs: &mut CfgSet) {
         Some("tima1") => "TIMA1",
         Some("any") => {
             // Order of timer candidates:
-            // 1. 16-bit, 2 channel
-            // 2. 16-bit, 2 channel with shadow registers
-            // 3. 16-bit, 4 channel
-            // 4. 16-bit with QEI
-            // 5. Advanced timers
+            // 1. Basic timers
+            // 2. 16-bit, 2 channel
+            // 3. 16-bit, 2 channel with shadow registers
+            // 4. 16-bit, 4 channel
+            // 5. 16-bit with QEI
+            // 6. Advanced timers
             //
-            // TODO: Select RTC first if available
             // TODO: 32-bit timers are not considered yet
             [
-                // 16-bit, 2 channel
+                // basic timers. No PWM pins
+                // "TIMB0", // 16-bit, 2 channel
                 "TIMG0", "TIMG1", "TIMG2", "TIMG3", // 16-bit, 2 channel with shadow registers
                 "TIMG4", "TIMG5", "TIMG6", "TIMG7",  // 16-bit, 4 channel
                 "TIMG14", // 16-bit with QEI
@@ -459,8 +497,41 @@ fn time_driver(singletons: &mut Vec<Singleton>, cfgs: &mut CfgSet) {
     }
 }
 
+fn pin_features(singletons: &mut Vec<Singleton>) {
+    let sysctl = METADATA
+        .peripherals
+        .iter()
+        .find(|p| p.name == "SYSCTL")
+        .expect("no SYSCTL peripheral");
+
+    // Some packages make NRST share a physical pin with a GPIO.
+    if let Some(pin) = sysctl.pins.iter().find(|p| p.signal == "NRST" && p.pin != "NRST") {
+        let pin = singletons
+            .iter_mut()
+            .find(|s| s.name == pin.pin)
+            .expect("Could not find NRST pin to cfg gate");
+
+        pin.cfg = Some(quote! { #[cfg(feature = "nrst-pin-as-gpio")] });
+    }
+
+    let debugss = METADATA
+        .peripherals
+        .iter()
+        .find(|p| p.name == "DEBUGSS")
+        .expect("Could not find DEBUGSS peripheral");
+
+    for pin in debugss.pins.iter() {
+        let pin = singletons
+            .iter_mut()
+            .find(|s| s.name == pin.pin)
+            .expect("Could not find SWD pin to cfg gate");
+
+        pin.cfg = Some(quote! { #[cfg(feature = "swd-pins-as-gpio")] });
+    }
+}
+
 fn generate_singletons(singletons: &[Singleton]) -> TokenStream {
-    let singletons = singletons
+    let singletons_peripherals_struct = singletons
         .iter()
         .map(|s| {
             let cfg = s.cfg.clone().unwrap_or_default();
@@ -474,9 +545,20 @@ fn generate_singletons(singletons: &[Singleton]) -> TokenStream {
         })
         .collect::<Vec<_>>();
 
+    let singletons_peripherals_def = singletons
+        .iter()
+        .map(|s| {
+            let ident = format_ident!("{}", s.name);
+
+            quote! {
+                #ident
+            }
+        })
+        .collect::<Vec<_>>();
+
     quote! {
-        embassy_hal_internal::peripherals_definition!(#(#singletons),*);
-        embassy_hal_internal::peripherals_struct!(#(#singletons),*);
+        embassy_hal_internal::peripherals_definition!(#(#singletons_peripherals_def),*);
+        embassy_hal_internal::peripherals_struct!(#(#singletons_peripherals_struct),*);
     }
 }
 
@@ -486,6 +568,8 @@ fn generate_timers() -> TokenStream {
         .peripherals
         .iter()
         .filter(|p| p.name.starts_with("TIM"))
+        // TODO: Fix TIMB when used at time driver.
+        .filter(|p| !p.name.starts_with("TIMB"))
         .map(|peripheral| {
             let name = Ident::new(&peripheral.name, Span::call_site());
             let timers = &*TIMERS;
@@ -537,6 +621,8 @@ fn generate_interrupts() -> TokenStream {
         pub fn enable_group_interrupts(_cs: critical_section::CriticalSection) {
             use crate::interrupt::typelevel::Interrupt;
 
+            // This is empty for C1105/6
+            #[allow(unused_unsafe)]
             unsafe {
                 #(#group_interrupt_enables)*
             }
@@ -555,6 +641,8 @@ fn generate_peripheral_instances() -> TokenStream {
             "uart" => Some(quote! { impl_uart_instance!(#peri); }),
             "i2c" => Some(quote! { impl_i2c_instance!(#peri, #fifo_size); }),
             "wwdt" => Some(quote! { impl_wwdt_instance!(#peri); }),
+            "adc" => Some(quote! { impl_adc_instance!(#peri); }),
+            "mathacl" => Some(quote! { impl_mathacl_instance!(#peri); }),
             _ => None,
         };
 
@@ -603,6 +691,10 @@ fn generate_pin_trait_impls() -> TokenStream {
                 ("uart", "RTS") => Some(quote! { impl_uart_rts_pin!(#peri, #pin_name, #pf); }),
                 ("i2c", "SDA") => Some(quote! { impl_i2c_sda_pin!(#peri, #pin_name, #pf); }),
                 ("i2c", "SCL") => Some(quote! { impl_i2c_scl_pin!(#peri, #pin_name, #pf); }),
+                ("adc", s) => {
+                    let signal = s.parse::<u8>().unwrap();
+                    Some(quote! { impl_adc_pin!(#peri, #pin_name, #signal); })
+                }
 
                 _ => None,
             };
@@ -615,6 +707,35 @@ fn generate_pin_trait_impls() -> TokenStream {
 
     quote! {
         #(#impls)*
+    }
+}
+
+fn select_gpio_features(cfgs: &mut CfgSet) {
+    cfgs.declare_all(&[
+        "gpioa_interrupt",
+        "gpioa_group",
+        "gpiob_interrupt",
+        "gpiob_group",
+        "gpioc_group",
+    ]);
+
+    for interrupt in METADATA.interrupts.iter() {
+        match interrupt.name {
+            "GPIOA" => cfgs.enable("gpioa_interrupt"),
+            "GPIOB" => cfgs.enable("gpiob_interrupt"),
+            _ => (),
+        }
+    }
+
+    for group in METADATA.interrupt_groups.iter() {
+        for interrupt in group.interrupts {
+            match interrupt.name {
+                "GPIOA" => cfgs.enable("gpioa_group"),
+                "GPIOB" => cfgs.enable("gpiob_group"),
+                "GPIOC" => cfgs.enable("gpioc_group"),
+                _ => (),
+            }
+        }
     }
 }
 
@@ -659,6 +780,24 @@ struct TimerDesc {
 /// Description of all timer instances.
 const TIMERS: LazyLock<HashMap<String, TimerDesc>> = LazyLock::new(|| {
     let mut map = HashMap::new();
+    map.insert(
+        "TIMB0".into(),
+        TimerDesc {
+            bits: 16,
+            prescaler: true,
+            repeat_counter: false,
+            ccp_channels_internal: 2,
+            ccp_channels_external: 2,
+            external_pwm_channels: 0,
+            phase_load: false,
+            shadow_load: false,
+            shadow_ccs: false,
+            deadband: false,
+            fault_handler: false,
+            qei_hall: false,
+        },
+    );
+
     map.insert(
         "TIMG0".into(),
         TimerDesc {

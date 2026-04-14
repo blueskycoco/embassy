@@ -22,6 +22,7 @@ impl Into<u8> for XspiMode {
 
 /// Xspi lane width
 #[derive(Copy, Clone)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum XspiWidth {
     /// None
     NONE,
@@ -33,6 +34,8 @@ pub enum XspiWidth {
     QUAD,
     /// Eight lanes
     OCTO,
+    /// Sixteen lanes (Hexadeca-SPI)
+    HEXA,
 }
 
 impl Into<u8> for XspiWidth {
@@ -43,6 +46,7 @@ impl Into<u8> for XspiWidth {
             XspiWidth::DUAL => 0b10,
             XspiWidth::QUAD => 0b11,
             XspiWidth::OCTO => 0b100,
+            XspiWidth::HEXA => 0b101,
         }
     }
 }
@@ -50,6 +54,7 @@ impl Into<u8> for XspiWidth {
 /// Wrap Size
 #[allow(missing_docs)]
 #[derive(Copy, Clone)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum WrapSize {
     None,
     _16Bytes,
@@ -73,6 +78,7 @@ impl Into<u8> for WrapSize {
 /// Memory Type
 #[allow(missing_docs)]
 #[derive(Copy, Clone)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum MemoryType {
     Micron,
     Macronix,
@@ -80,6 +86,8 @@ pub enum MemoryType {
     MacronixRam,
     HyperBusMemory,
     HyperBusRegister,
+    APMemory16Bits, // AP Memory 16-bit (for  PSRAM in X8/X16 mode)
+    APMemory,       //The same as Standard
 }
 
 impl Into<u8> for MemoryType {
@@ -91,6 +99,8 @@ impl Into<u8> for MemoryType {
             MemoryType::MacronixRam => 0x03,
             MemoryType::HyperBusMemory => 0x04,
             MemoryType::HyperBusRegister => 0x04,
+            MemoryType::APMemory16Bits => 0x06,
+            MemoryType::APMemory => 0x02,
         }
     }
 }
@@ -98,6 +108,7 @@ impl Into<u8> for MemoryType {
 /// Xspi memory size.
 #[allow(missing_docs)]
 #[derive(Copy, Clone)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum MemorySize {
     _1KiB,
     _2KiB,
@@ -158,6 +169,7 @@ impl Into<u8> for MemorySize {
 
 /// Xspi Address size
 #[derive(Copy, Clone)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum AddressSize {
     /// 8-bit address
     _8bit,
@@ -183,6 +195,7 @@ impl Into<u8> for AddressSize {
 /// Time the Chip Select line stays high.
 #[allow(missing_docs)]
 #[derive(Copy, Clone)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum ChipSelectHighTime {
     _1Cycle,
     _2Cycle,
@@ -212,6 +225,7 @@ impl Into<u8> for ChipSelectHighTime {
 /// FIFO threshold.
 #[allow(missing_docs)]
 #[derive(Copy, Clone)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum FIFOThresholdLevel {
     _1Bytes,
     _2Bytes,
@@ -289,6 +303,7 @@ impl Into<u8> for FIFOThresholdLevel {
 /// Dummy cycle count
 #[allow(missing_docs)]
 #[derive(Copy, Clone)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum DummyCycles {
     _0,
     _1,

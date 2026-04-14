@@ -1,5 +1,6 @@
 #![cfg_attr(not(test), no_std)]
 #![allow(async_fn_in_trait)]
+#![allow(unsafe_op_in_unsafe_fn)]
 #![doc = include_str!("../README.md")]
 #![warn(missing_docs)]
 
@@ -22,7 +23,10 @@ use crate::fmt::Bytes;
 
 pub mod otg_v1;
 
-use otg_v1::{regs, vals, Otg};
+#[cfg(feature = "host")]
+pub mod host;
+
+use otg_v1::{Otg, regs, vals};
 
 /// Handle interrupts.
 pub unsafe fn on_interrupt<const MAX_EP_COUNT: usize>(r: Otg, state: &State<MAX_EP_COUNT>, ep_count: usize) {
@@ -76,10 +80,16 @@ pub unsafe fn on_interrupt<const MAX_EP_COUNT: usize>(r: Otg, state: &State<MAX_
                     let buf =
                         unsafe { core::slice::from_raw_parts_mut(*state.ep_states[ep_num].out_buffer.get(), len) };
 
-                    for chunk in buf.chunks_mut(4) {
+                    let mut chunks = buf.chunks_exact_mut(4);
+                    for chunk in &mut chunks {
                         // RX FIFO is shared so always read from fifo(0)
                         let data = r.fifo(0).read().0;
-                        chunk.copy_from_slice(&data.to_ne_bytes()[0..chunk.len()]);
+                        chunk.copy_from_slice(&data.to_ne_bytes());
+                    }
+                    let rem = chunks.into_remainder();
+                    if !rem.is_empty() {
+                        let data = r.fifo(0).read().0;
+                        rem.copy_from_slice(&data.to_ne_bytes()[0..rem.len()]);
                     }
 
                     state.ep_states[ep_num].out_size.store(len as u16, Ordering::Release);
@@ -157,6 +167,55 @@ pub unsafe fn on_interrupt<const MAX_EP_COUNT: usize>(r: Otg, state: &State<MAX_
 
             ep_mask >>= 1;
             ep_num += 1;
+        }
+    }
+
+    if ints.eopf() {
+        let frame_number = r.dsts().read().fnsof();
+        let frame_is_odd = frame_number & 0x01 == 1;
+
+        // If an isochronous endpoint has an IN message waiting in its FIFO, but the host didn't poll for it before eof,
+        // switch the packet polarity, in the hope that it will be polled for in the next frame.
+        for ep_num in (0..ep_count).into_iter().filter(|ep_num| {
+            let diepctl = r.diepctl(*ep_num).read();
+            // Find iso endpoints
+            diepctl.eptyp() == vals::Eptyp::ISOCHRONOUS
+                // That have and unsent IN message
+                && diepctl.epena()
+                // Where the frame polarity matches the current frame
+                && diepctl.eonum_dpid() == frame_is_odd
+        }) {
+            trace!("Unsent message at EOF for ep: {}, frame: {}", ep_num, frame_number);
+
+            let ep_diepctl = r.diepctl(ep_num);
+            let ep_diepint = r.diepint(ep_num);
+
+            // Set NAK
+            ep_diepctl.modify(|m| m.set_snak(true));
+            while !ep_diepint.read().inepne() {}
+
+            // Disable the endpoint
+            ep_diepctl.modify(|m| {
+                m.set_snak(true);
+                m.set_epdis(true);
+            });
+            while !ep_diepint.read().epdisd() {}
+            ep_diepint.modify(|m| m.set_epdisd(true));
+
+            // Switch the packet polarity
+            ep_diepctl.modify(|r| {
+                if frame_is_odd {
+                    r.set_sd0pid_sevnfrm(true);
+                } else {
+                    r.set_soddfrm_sd1pid(true);
+                }
+            });
+
+            // Enable the endpoint again
+            ep_diepctl.modify(|w| {
+                w.set_cnak(true);
+                w.set_epena(true);
+            });
         }
     }
 }
@@ -534,16 +593,79 @@ impl<'d, const MAX_EP_COUNT: usize> Bus<'d, MAX_EP_COUNT> {
         self.instance.phy_type
     }
 
+    /// Applies a DWC2 core soft reset.
+    pub fn core_soft_reset(&mut self) {
+        let r = self.instance.regs;
+
+        // Wait for AHB idle
+        while !r.grstctl().read().ahbidl() {}
+
+        r.grstctl().write(|w| {
+            w.set_csrst(true);
+        });
+
+        // Wait until the reset done
+        loop {
+            let grstctl = r.grstctl().read();
+            if !grstctl.csrst() || grstctl.csrstdone() {
+                break;
+            }
+        }
+
+        // On synchronous-reset cores, CSRSTDONE is W1C. Preserve it in the writeback so it gets cleared.
+        r.grstctl().modify(|w| {
+            w.set_csrst(false);
+        });
+    }
+
     /// Configures the PHY as a device.
     pub fn configure_as_device(&mut self) {
         let r = self.instance.regs;
         let phy_type = self.instance.phy_type;
+
+        // Read PHY data width from GHWCFG4:
+        // 0 = 8-bit only, 1 = 16-bit only, 2 = software selectable (default to 8-bit)
+        let hw_width = r.hwcfg4().read().utmi_phy_data_width();
         r.gusbcfg().write(|w| {
             // Force device mode
             w.set_fdmod(true);
-            // Enable internal full-speed PHY
-            w.set_physel(phy_type.internal() && !phy_type.high_speed());
+
+            match phy_type {
+                PhyType::InternalFullSpeed => {
+                    // Select embedded FS PHY
+                    w.set_physel(true);
+                    w.set_ulpi_utmi_sel(false);
+                    w.set_phyif(false);
+                }
+                PhyType::InternalHighSpeed => {
+                    // Select UTMI+ PHY, determine data width from hardware
+                    w.set_physel(false);
+                    w.set_ulpi_utmi_sel(false);
+                    w.set_phyif(hw_width == 1);
+                    // Disable ULPI-specific settings
+                    w.set_ulpievbusd(false);
+                    w.set_ulpievbusi(false);
+                    w.set_ulpifsls(false);
+                    w.set_ulpicsm(false);
+                }
+                PhyType::ExternalFullSpeed | PhyType::ExternalHighSpeed => {
+                    // Select ULPI external PHY, single data rate
+                    w.set_physel(false);
+                    w.set_ulpi_utmi_sel(true);
+                    w.set_phyif(false);
+                    w.set_ddr_sel(false);
+                    // Disable external VBUS source
+                    w.set_ulpievbusd(false);
+                    w.set_ulpievbusi(false);
+                    // Disable ULPI FS/LS mode
+                    w.set_ulpifsls(false);
+                    w.set_ulpicsm(false);
+                }
+            }
         });
+
+        // Wait for device mode ready
+        while r.gintsts().read().cmod() {}
     }
 
     /// Applies configuration specific to
@@ -673,9 +795,7 @@ impl<'d, const MAX_EP_COUNT: usize> Bus<'d, MAX_EP_COUNT> {
                 if let Some(ep) = self.ep_in[i] {
                     trace!(
                         "configuring tx fifo ep={}, offset={}, size={}",
-                        i,
-                        fifo_top,
-                        ep.fifo_size_words
+                        i, fifo_top, ep.fifo_size_words
                     );
 
                     let dieptxf = if i == 0 { regs.dieptxf0() } else { regs.dieptxf(i - 1) };
@@ -773,15 +893,28 @@ impl<'d, const MAX_EP_COUNT: usize> Bus<'d, MAX_EP_COUNT> {
             self.endpoint_set_enabled(EndpointAddress::from_parts(i, Direction::Out), false);
         }
     }
+
+    /// Initialize the device core once before polling for events.
+    pub fn init_device(&mut self) {
+        if !self.inited {
+            self.init();
+            self.inited = true;
+        }
+    }
+
+    /// Deinitialize tehe device
+    pub fn deinit_device(&mut self) {
+        if self.inited {
+            self.inited = false;
+        }
+    }
 }
 
 impl<'d, const MAX_EP_COUNT: usize> embassy_usb_driver::Bus for Bus<'d, MAX_EP_COUNT> {
     async fn poll(&mut self) -> Event {
         poll_fn(move |cx| {
             if !self.inited {
-                self.init();
-                self.inited = true;
-
+                self.init_device();
                 // If no vbus detection, just return a single PowerDetected event at startup.
                 if !self.config.vbus_detection {
                     return Poll::Ready(Event::PowerDetected);
@@ -941,15 +1074,18 @@ impl<'d, const MAX_EP_COUNT: usize> embassy_usb_driver::Bus for Bus<'d, MAX_EP_C
                         w.set_usbaep(enabled);
                     });
 
-                    // Flush tx fifo
-                    regs.grstctl().write(|w| {
-                        w.set_txfflsh(true);
-                        w.set_txfnum(ep_addr.index() as _);
-                    });
-                    loop {
-                        let x = regs.grstctl().read();
-                        if !x.txfflsh() {
-                            break;
+                    // When re-enabling a non-EP0 OUT endpoint, prime it to receive a packet.
+                    // Without this, the endpoint stays idle after reconnect and silently drops data.
+                    if enabled && ep_addr.index() != 0 {
+                        if let Some(ep) = &self.ep_out[ep_addr.index()] {
+                            regs.doeptsiz(ep_addr.index()).modify(|w| {
+                                w.set_xfrsiz(ep.max_packet_size as _);
+                                w.set_pktcnt(1);
+                            });
+                            regs.doepctl(ep_addr.index()).modify(|w| {
+                                w.set_cnak(true);
+                                w.set_epena(true);
+                            });
                         }
                     }
                 });
@@ -969,8 +1105,25 @@ impl<'d, const MAX_EP_COUNT: usize> embassy_usb_driver::Bus for Bus<'d, MAX_EP_C
 
                     regs.diepctl(ep_addr.index()).modify(|w| {
                         w.set_usbaep(enabled);
-                        w.set_cnak(enabled); // clear NAK that might've been set by SNAK above.
-                    })
+                        // Set NAK on enable so the endpoint NAKs IN tokens until the
+                        // application queues a transfer. Clearing NAK prematurely causes
+                        // the host to see unexpected empty packets.
+                        if enabled {
+                            w.set_snak(true);
+                        }
+                    });
+
+                    // Flush tx fifo
+                    regs.grstctl().write(|w| {
+                        w.set_txfflsh(true);
+                        w.set_txfnum(ep_addr.index() as _);
+                    });
+                    loop {
+                        let x = regs.grstctl().read();
+                        if !x.txfflsh() {
+                            break;
+                        }
+                    }
                 });
 
                 // Wake `Endpoint::wait_enabled()`
@@ -1115,7 +1268,7 @@ impl<'d> embassy_usb_driver::EndpointOut for Endpoint<'d, Out> {
                             if frame_is_odd {
                                 r.set_sd0pid_sevnfrm(true);
                             } else {
-                                r.set_sd1pid_soddfrm(true);
+                                r.set_soddfrm(true);
                             }
                         });
                     }
@@ -1152,9 +1305,7 @@ impl<'d> embassy_usb_driver::EndpointIn for Endpoint<'d, In> {
             let dtxfsts = self.regs.dtxfsts(index).read();
             trace!(
                 "write ep={:?}: diepctl {:08x} ftxfsts {:08x}",
-                self.info.addr,
-                diepctl.0,
-                dtxfsts.0
+                self.info.addr, diepctl.0, dtxfsts.0
             );
             if !diepctl.usbaep() {
                 trace!("write ep={:?} wait for prev: error disabled", self.info.addr);
@@ -1217,7 +1368,7 @@ impl<'d> embassy_usb_driver::EndpointIn for Endpoint<'d, In> {
                     if frame_is_odd {
                         r.set_sd0pid_sevnfrm(true);
                     } else {
-                        r.set_sd1pid_soddfrm(true);
+                        r.set_soddfrm_sd1pid(true);
                     }
                 });
             }
@@ -1229,23 +1380,19 @@ impl<'d> embassy_usb_driver::EndpointIn for Endpoint<'d, In> {
             });
 
             // Write data to FIFO
-            let chunks = buf.chunks_exact(4);
-            // Stash the last partial chunk
-            let rem = chunks.remainder();
-            let last_chunk = (!rem.is_empty()).then(|| {
-                let mut tmp = [0u8; 4];
-                tmp[0..rem.len()].copy_from_slice(rem);
-                u32::from_ne_bytes(tmp)
-            });
-
             let fifo = self.regs.fifo(index);
-            for chunk in chunks {
+            let mut chunks = buf.chunks_exact(4);
+            for chunk in &mut chunks {
                 let val = u32::from_ne_bytes(chunk.try_into().unwrap());
                 fifo.write_value(regs::Fifo(val));
             }
             // Write any last chunk
-            if let Some(val) = last_chunk {
-                fifo.write_value(regs::Fifo(val));
+            let rem = chunks.remainder();
+            if !rem.is_empty() {
+                let mut tmp = [0u8; 4];
+                tmp[0..rem.len()].copy_from_slice(rem);
+                let tmp = u32::from_ne_bytes(tmp);
+                fifo.write_value(regs::Fifo(tmp));
             }
         });
 
@@ -1373,11 +1520,7 @@ fn ep_irq_mask(eps: &[Option<EndpointData>]) -> u16 {
     eps.iter().enumerate().fold(
         0,
         |mask, (index, ep)| {
-            if ep.is_some() {
-                mask | (1 << index)
-            } else {
-                mask
-            }
+            if ep.is_some() { mask | (1 << index) } else { mask }
         },
     )
 }

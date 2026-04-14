@@ -18,6 +18,7 @@ Rust's [async/await](https://rust-lang.github.io/async-book/) allows for unprece
     - [embassy-nrf](https://docs.embassy.dev/embassy-nrf/), for the Nordic Semiconductor nRF52, nRF53, nRF54 and nRF91 series.
     - [embassy-rp](https://docs.embassy.dev/embassy-rp/), for the Raspberry Pi RP2040 and RP23xx microcontrollers.
     - [embassy-mspm0](https://docs.embassy.dev/embassy-mspm0/), for the Texas Instruments MSPM0 microcontrollers.
+    - [embassy-mcxa](https://docs.embassy.dev/embassy-mcxa/), for NXP's MCX-A series of microcontrollers.
     - [esp-rs](https://github.com/esp-rs), for the Espressif Systems ESP32 series of chips.
         - Embassy HAL support for Espressif chips, as well as Async Wi-Fi, Bluetooth, and ESP-NOW, is being developed in the [esp-rs/esp-hal](https://github.com/esp-rs/esp-hal) repository.
     - [ch32-hal](https://github.com/ch32-rs/ch32-hal), for the WCH 32-bit RISC-V(CH32V) series of chips.
@@ -28,7 +29,7 @@ Rust's [async/await](https://rust-lang.github.io/async-book/) allows for unprece
   No more messing with hardware timers. [embassy_time](https://docs.embassy.dev/embassy-time) provides Instant, Duration, and Timer types that are globally available and never overflow.
 
 - **Real-time ready** -
-  Tasks on the same async executor run cooperatively, but you can create multiple executors with different priorities so that higher priority tasks preempt lower priority ones. See the [example](https://github.com/embassy-rs/embassy/blob/master/examples/nrf52840/src/bin/multiprio.rs).
+  Tasks on the same async executor run cooperatively, but you can create multiple executors with different priorities so that higher priority tasks preempt lower priority ones. See the [example](https://github.com/embassy-rs/embassy/blob/main/examples/nrf52840/src/bin/multiprio.rs).
 
 - **Low-power ready** -
   Easily build devices with years of battery life. The async executor automatically puts the core to sleep when there's no work to do. Tasks are woken by interrupts, there is no busy-loop polling while waiting.
@@ -38,7 +39,7 @@ Rust's [async/await](https://rust-lang.github.io/async-book/) allows for unprece
 
 - **Bluetooth**
     - The [trouble](https://github.com/embassy-rs/trouble) crate provides a Bluetooth Low Energy 4.x and 5.x Host that runs on any microcontroller implementing the [bt-hci](https://github.com/embassy-rs/bt-hci) traits (currently
-      `nRF52`, `rp2040`, `rp23xx` and `esp32` and `serial` controllers are supported).
+      `nRF52`, `nrf54`, `rp2040`, `rp23xx` and `esp32` and `serial` controllers are supported).
     - The [nrf-softdevice](https://github.com/embassy-rs/nrf-softdevice) crate provides Bluetooth Low Energy 4.x and 5.x support for nRF52 microcontrollers.
     - The [embassy-stm32-wpan](https://github.com/embassy-rs/embassy/tree/main/embassy-stm32-wpan) crate provides Bluetooth Low Energy 5.x support for stm32wb microcontrollers.
 
@@ -49,7 +50,7 @@ Rust's [async/await](https://rust-lang.github.io/async-book/) allows for unprece
   [embassy-usb](https://docs.embassy.dev/embassy-usb/) implements a device-side USB stack. Implementations for common classes such as USB serial (CDC ACM) and USB HID are available, and a rich builder API allows building your own.
 
 - **Bootloader and DFU** -
-  [embassy-boot](https://github.com/embassy-rs/embassy/tree/master/embassy-boot) is a lightweight bootloader supporting firmware application upgrades in a power-fail-safe way, with trial boots and rollbacks.
+  [embassy-boot](https://github.com/embassy-rs/embassy/tree/main/embassy-boot) is a lightweight bootloader supporting firmware application upgrades in a power-fail-safe way, with trial boots and rollbacks.
 
 ## Sneak peek
 
@@ -103,7 +104,8 @@ Examples are found in the
   `nrf52840-dk` board (PCA10056) but should be easily adaptable to other nRF52 chips and boards.
 * `examples/nrf5340` run on the `nrf5340-dk` board (PCA10095).
 * `examples/stm32xx` for the various STM32 families.
-* `examples/rp` are for the RP2040 chip.
+* `examples/rp` are for the RP2040 and RP235x chips.
+* `examples/mcxa` run on the `FRDM-MCXA266` board.
 * `examples/std` are designed to run locally on your PC.
 
 ### Running examples
@@ -163,5 +165,5 @@ Unless you explicitly state otherwise, any contribution intentionally submitted
 for inclusion in the work by you, as defined in the Apache-2.0 license, shall be
 dual licensed as above, without any additional terms or conditions.
 
-[1]: https://github.com/embassy-rs/embassy/wiki/Getting-Started
+[1]: https://embassy-rs.github.io/embassy-book/embassy/dev/getting_started.html
 [2]: https://github.com/embassy-rs/embassy/wiki/Running-the-Examples

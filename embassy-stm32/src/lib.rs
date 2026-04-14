@@ -1,5 +1,6 @@
 #![cfg_attr(not(test), no_std)]
 #![allow(async_fn_in_trait)]
+#![allow(unsafe_op_in_unsafe_fn)]
 #![cfg_attr(
     docsrs,
     doc = "<div style='padding:30px;background:#810;color:#fff;text-align:center;'><p>You might want to <a href='https://docs.embassy.dev/embassy-stm32'>browse the `embassy-stm32` documentation on the Embassy website</a> instead.</p><p>The documentation here on `docs.rs` is built for a single chip only (stm32h7, stm32h7rs55 in particular), while on the Embassy website you can pick your exact chip from the top menu. Available peripherals and their APIs change depending on the chip.</p></div>\n\n"
@@ -53,11 +54,32 @@ pub mod timer;
 
 #[cfg(adc)]
 pub mod adc;
+#[cfg(aes_v3b)]
+pub mod aes;
+#[cfg(backup_sram)]
+pub mod backup_sram;
 #[cfg(can)]
 pub mod can;
-// FIXME: Cordic driver cause stm32u5a5zj crash
-#[cfg(all(cordic, not(any(stm32u5a5, stm32u5a9))))]
+#[cfg(any(comp_u5, comp_v1, comp_v2))]
+pub mod comp;
+#[cfg(cordic)]
 pub mod cordic;
+
+// Stub macros for COMP pin implementations when comp module is not compiled.
+// These are needed because build.rs generates macro calls for all chips with COMP,
+// but the actual macros are only defined in the comp module.
+#[cfg(all(comp, not(any(comp_u5, comp_v1, comp_v2))))]
+#[allow(unused_macros)]
+macro_rules! impl_comp_inp_pin {
+    ($inst:ident, $pin:ident, $ch:expr) => {};
+}
+#[cfg(all(comp, not(any(comp_u5, comp_v1, comp_v2))))]
+#[allow(unused_macros)]
+macro_rules! impl_comp_inm_pin {
+    ($inst:ident, $pin:ident, $ch:expr) => {};
+}
+#[cfg(any(ipcc, hsem))]
+pub mod cpu;
 #[cfg(crc)]
 pub mod crc;
 #[cfg(cryp)]
@@ -66,6 +88,8 @@ pub mod cryp;
 pub mod dac;
 #[cfg(dcmi)]
 pub mod dcmi;
+#[cfg(dma2d)]
+pub mod dma2d;
 #[cfg(dsihost)]
 pub mod dsihost;
 #[cfg(dts)]
@@ -74,12 +98,13 @@ pub mod dts;
 pub mod eth;
 #[cfg(feature = "exti")]
 pub mod exti;
+#[cfg(flash)]
 pub mod flash;
 #[cfg(fmc)]
 pub mod fmc;
 #[cfg(hash)]
 pub mod hash;
-#[cfg(hrtim)]
+#[cfg(all(hrtim, feature = "stm32-hrtim"))]
 pub mod hrtim;
 #[cfg(hsem)]
 pub mod hsem;
@@ -87,10 +112,12 @@ pub mod hsem;
 pub mod hspi;
 #[cfg(i2c)]
 pub mod i2c;
-#[cfg(any(all(spi_v1, rcc_f4), spi_v3))]
+#[cfg(any(spi_v1_i2s, spi_v2_i2s, spi_v3_i2s, spi_v4_i2s, spi_v5_i2s))]
 pub mod i2s;
-#[cfg(stm32wb)]
+#[cfg(any(stm32wb, stm32wl5x))]
 pub mod ipcc;
+#[cfg(lcd)]
+pub mod lcd;
 #[cfg(feature = "low-power")]
 pub mod low_power;
 #[cfg(lptim)]
@@ -101,12 +128,16 @@ pub mod ltdc;
 pub mod opamp;
 #[cfg(octospi)]
 pub mod ospi;
+#[cfg(pka_v1a)]
+pub mod pka;
 #[cfg(quadspi)]
 pub mod qspi;
 #[cfg(rng)]
 pub mod rng;
 #[cfg(all(rtc, not(rtc_v1)))]
 pub mod rtc;
+#[cfg(saes_v1a)]
+pub mod saes;
 #[cfg(sai)]
 pub mod sai;
 #[cfg(sdmmc)]
@@ -132,6 +163,9 @@ pub mod wdg;
 #[cfg(xspi)]
 pub mod xspi;
 
+#[cfg(feature = "_executor")]
+pub mod executor;
+
 // This must go last, so that it sees all the impl_foo! macros defined earlier.
 pub(crate) mod _generated {
     #![allow(dead_code)]
@@ -144,10 +178,16 @@ pub(crate) mod _generated {
 
 pub use crate::_generated::interrupt;
 
+/// Generated list of triggers to use in the `timer`, `adc`, `dac`, and other modules.
+pub mod triggers {
+    #[allow(unused_imports)]
+    pub use crate::_generated::triggers::*;
+}
+
 /// Macro to bind interrupts to handlers.
 ///
 /// This defines the right interrupt handlers, and creates a unit struct (like `struct Irqs;`)
-/// and implements the right [`Binding`]s for it. You can pass this struct to drivers to
+/// and implements the right [`Binding`](crate::interrupt::typelevel::Binding)s for it. You can pass this struct to drivers to
 /// prove at compile-time that the right interrupts have been bound.
 ///
 /// Example of how to bind one interrupt:
@@ -174,7 +214,10 @@ pub use crate::_generated::interrupt;
 ///     }
 /// );
 /// ```
-
+///
+/// Some chips collate multiple interrupt signals into a single interrupt vector. In the above example, I2C2_3 is a
+/// single vector which is activated by events and errors on both peripherals I2C2 and I2C3. Check your chip's list
+/// of interrupt vectors if you get an unexpected compile error trying to bind the standard name.
 // developer note: this macro can't be in `embassy-hal-internal` due to the use of `$crate`.
 #[macro_export]
 macro_rules! bind_interrupts {
@@ -194,7 +237,7 @@ macro_rules! bind_interrupts {
 
         $(
             #[allow(non_snake_case)]
-            #[no_mangle]
+            #[unsafe(no_mangle)]
             $(#[cfg($cond_irq)])?
             $(#[doc = $doc])*
             unsafe extern "C" fn $irq() {
@@ -222,7 +265,7 @@ macro_rules! bind_interrupts {
 }
 
 // Reexports
-pub use _generated::{peripherals, Peripherals};
+pub use _generated::{Peripherals, peripherals};
 pub use embassy_hal_internal::{Peri, PeripheralType};
 #[cfg(feature = "unstable-pac")]
 pub use stm32_metapac as pac;
@@ -240,6 +283,14 @@ pub struct Config {
     /// RCC config.
     pub rcc: rcc::Config,
 
+    #[cfg(feature = "low-power")]
+    /// RTC config
+    pub rtc: rtc::RtcConfig,
+
+    #[cfg(feature = "low-power")]
+    /// Minimum time to stop
+    pub min_stop_pause: embassy_time::Duration,
+
     /// Enable debug during sleep and stop.
     ///
     /// May increase power consumption. Defaults to true.
@@ -251,11 +302,11 @@ pub struct Config {
     /// which needs to be enabled before these pins can be used.
     ///
     /// May increase power consumption. Defaults to true.
-    #[cfg(any(stm32l4, stm32l5, stm32u5, stm32wba))]
+    #[cfg(any(stm32l4, stm32l5, stm32u5, stm32u3, stm32wba))]
     pub enable_independent_io_supply: bool,
 
     /// On the U5 series all analog peripherals are powered by a separate supply.
-    #[cfg(stm32u5)]
+    #[cfg(any(stm32u5, stm32u3))]
     pub enable_independent_analog_supply: bool,
 
     /// BDMA interrupt priority.
@@ -276,6 +327,12 @@ pub struct Config {
     #[cfg(gpdma)]
     pub gpdma_interrupt_priority: Priority,
 
+    /// MDMA interrupt priority.
+    ///
+    /// Defaults to P0 (highest).
+    #[cfg(mdma)]
+    pub mdma_interrupt_priority: Priority,
+
     /// Enables UCPD1 dead battery functionality.
     ///
     /// Defaults to false (disabled).
@@ -287,17 +344,25 @@ pub struct Config {
     /// Defaults to false (disabled).
     #[cfg(peri_ucpd2)]
     pub enable_ucpd2_dead_battery: bool,
+
+    /// Allows JTAG pins to be used for GPIO
+    #[cfg(stm32f1)]
+    pub swj: gpio::SwjCfg,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
             rcc: Default::default(),
+            #[cfg(feature = "low-power")]
+            rtc: Default::default(),
+            #[cfg(feature = "low-power")]
+            min_stop_pause: embassy_time::Duration::from_millis(250),
             #[cfg(dbgmcu)]
             enable_debug_during_sleep: true,
-            #[cfg(any(stm32l4, stm32l5, stm32u5, stm32wba))]
+            #[cfg(any(stm32l4, stm32l5, stm32u5, stm32u3, stm32wba))]
             enable_independent_io_supply: true,
-            #[cfg(stm32u5)]
+            #[cfg(any(stm32u5, stm32u3))]
             enable_independent_analog_supply: true,
             #[cfg(bdma)]
             bdma_interrupt_priority: Priority::P0,
@@ -305,10 +370,14 @@ impl Default for Config {
             dma_interrupt_priority: Priority::P0,
             #[cfg(gpdma)]
             gpdma_interrupt_priority: Priority::P0,
+            #[cfg(mdma)]
+            mdma_interrupt_priority: Priority::P0,
             #[cfg(peri_ucpd1)]
             enable_ucpd1_dead_battery: false,
             #[cfg(peri_ucpd2)]
             enable_ucpd2_dead_battery: false,
+            #[cfg(stm32f1)]
+            swj: Default::default(),
         }
     }
 }
@@ -327,7 +396,6 @@ pub fn init(config: Config) -> Peripherals {
 mod dual_core {
     use core::cell::UnsafeCell;
     use core::mem::MaybeUninit;
-    use core::sync::atomic::{AtomicUsize, Ordering};
 
     use rcc::Clocks;
 
@@ -350,14 +418,13 @@ mod dual_core {
     /// This static must be placed in the same position for both cores. How and where this is done is left to the user.
     #[repr(C)]
     pub struct SharedData {
-        init_flag: AtomicUsize,
         clocks: UnsafeCell<MaybeUninit<Clocks>>,
         config: UnsafeCell<MaybeUninit<SharedConfig>>,
+        #[cfg(feature = "low-power")]
+        rcc_config: UnsafeCell<MaybeUninit<Option<rcc::Config>>>,
     }
 
     unsafe impl Sync for SharedData {}
-
-    const INIT_DONE_FLAG: usize = 0xca11ab1e;
 
     /// Initialize the `embassy-stm32` HAL with the provided configuration.
     /// This function does the actual initialization of the hardware, in contrast to [init_secondary] or [try_init_secondary].
@@ -367,22 +434,35 @@ mod dual_core {
     ///
     /// This should only be called once at startup, otherwise it panics.
     ///
-    /// The `shared_data` is used to coordinate the init with the second core. Read the [SharedData] docs
-    /// for more information on its requirements.
+    /// A hardware semaphore is used to coordinate the init with the second core.
     pub fn init_primary(config: Config, shared_data: &'static MaybeUninit<SharedData>) -> Peripherals {
         let shared_data = unsafe { shared_data.assume_init_ref() };
 
-        // Write the flag as soon as possible. Reading this flag uninitialized in the `init_secondary`
-        // is maybe unsound? Unclear. If it is indeed unsound, writing it sooner doesn't fix it all,
-        // but improves the odds of it going right
-        shared_data.init_flag.store(0, Ordering::SeqCst);
+        // Enable hardware semaphore.
+        // Attempting to reset is a race condition, as the second core may be using HSEM and deadlock.
+        critical_section::with(|cs| {
+            rcc::enable_with_cs::<peripherals::HSEM>(cs);
+        });
+
+        #[cfg(stm32h7)]
+        {
+            use stm32_metapac::RCC;
+
+            use super::cpu::CoreId;
+
+            // Wait for secondary core clocks
+            match CoreId::current() {
+                CoreId::Core0 => while RCC.cr().read().d2ckrdy() == false {},
+                CoreId::Core1 => while RCC.cr().read().d1ckrdy() == false {},
+            }
+        }
 
         rcc::set_freqs_ptr(shared_data.clocks.get());
+        #[cfg(feature = "low-power")]
+        rcc::set_rcc_config_ptr(shared_data.rcc_config.get());
         let p = init_hw(config);
 
-        unsafe { *shared_data.config.get() }.write(config.into());
-
-        shared_data.init_flag.store(INIT_DONE_FLAG, Ordering::SeqCst);
+        hsem::get_hsem(1).blocking_notify();
 
         p
     }
@@ -394,17 +474,16 @@ mod dual_core {
     ///
     /// This should only be called once at startup, otherwise it may panic.
     ///
-    /// The `shared_data` is used to coordinate the init with the second core. Read the [SharedData] docs
-    /// for more information on its requirements.
+    /// A hardware semaphore is used to coordinate the init with the second core.
     pub fn try_init_secondary(shared_data: &'static MaybeUninit<SharedData>) -> Option<Peripherals> {
+        critical_section::with(|cs| {
+            rcc::enable_with_cs::<peripherals::HSEM>(cs);
+        });
+
+        // Wait for the semaphore to be unlocked by the primary core
+        hsem::get_hsem(1).blocking_listen();
+
         let shared_data = unsafe { shared_data.assume_init_ref() };
-
-        if shared_data.init_flag.load(Ordering::SeqCst) != INIT_DONE_FLAG {
-            return None;
-        }
-
-        // Separate load and store to support the CM0 of the STM32WL
-        shared_data.init_flag.store(0, Ordering::SeqCst);
 
         Some(init_secondary_hw(shared_data))
     }
@@ -428,6 +507,8 @@ mod dual_core {
 
     fn init_secondary_hw(shared_data: &'static SharedData) -> Peripherals {
         rcc::set_freqs_ptr(shared_data.clocks.get());
+        #[cfg(feature = "low-power")]
+        rcc::set_rcc_config_ptr(shared_data.rcc_config.get());
 
         let config = unsafe { (*shared_data.config.get()).assume_init() };
 
@@ -442,7 +523,12 @@ mod dual_core {
                     config.dma_interrupt_priority,
                     #[cfg(gpdma)]
                     config.gpdma_interrupt_priority,
-                )
+                    #[cfg(mdma)]
+                    config.mdma_interrupt_priority,
+                );
+
+                #[cfg(feature = "exti")]
+                exti::init(cs);
             }
 
             #[cfg(feature = "_time-driver")]
@@ -462,6 +548,8 @@ mod dual_core {
         dma_interrupt_priority: Priority,
         #[cfg(gpdma)]
         gpdma_interrupt_priority: Priority,
+        #[cfg(mdma)]
+        mdma_interrupt_priority: Priority,
     }
 
     impl From<Config> for SharedConfig {
@@ -473,6 +561,8 @@ mod dual_core {
                 dma_interrupt_priority,
                 #[cfg(gpdma)]
                 gpdma_interrupt_priority,
+                #[cfg(mdma)]
+                mdma_interrupt_priority,
                 ..
             } = value;
 
@@ -483,6 +573,8 @@ mod dual_core {
                 dma_interrupt_priority,
                 #[cfg(gpdma)]
                 gpdma_interrupt_priority,
+                #[cfg(mdma)]
+                mdma_interrupt_priority,
             }
         }
     }
@@ -495,6 +587,16 @@ fn init_hw(config: Config) -> Peripherals {
     critical_section::with(|cs| {
         let p = Peripherals::take_with_cs(cs);
 
+        #[cfg(dbgmcu_n6)]
+        {
+            crate::pac::RCC.miscensr().write(|w| w.set_dbgens(true));
+            crate::pac::RCC.miscenr().read(); // volatile read
+            crate::pac::DBGMCU
+                .cr()
+                .modify(|w| w.set_dbgclken(stm32_metapac::dbgmcu::vals::Dbgclken::B0x1));
+            crate::pac::DBGMCU.cr().read();
+        }
+
         #[cfg(dbgmcu)]
         crate::pac::DBGMCU.cr().modify(|cr| {
             #[cfg(dbgmcu_h5)]
@@ -502,14 +604,16 @@ fn init_hw(config: Config) -> Peripherals {
                 cr.set_stop(config.enable_debug_during_sleep);
                 cr.set_standby(config.enable_debug_during_sleep);
             }
-            #[cfg(any(dbgmcu_f0, dbgmcu_c0, dbgmcu_g0, dbgmcu_u0, dbgmcu_u5, dbgmcu_wba, dbgmcu_l5))]
+            #[cfg(any(
+                dbgmcu_f0, dbgmcu_c0, dbgmcu_g0, dbgmcu_u0, dbgmcu_u3, dbgmcu_u5, dbgmcu_wba, dbgmcu_l5
+            ))]
             {
                 cr.set_dbg_stop(config.enable_debug_during_sleep);
                 cr.set_dbg_standby(config.enable_debug_during_sleep);
             }
             #[cfg(any(
                 dbgmcu_f1, dbgmcu_f2, dbgmcu_f3, dbgmcu_f4, dbgmcu_f7, dbgmcu_g4, dbgmcu_f7, dbgmcu_l0, dbgmcu_l1,
-                dbgmcu_l4, dbgmcu_wb, dbgmcu_wl
+                dbgmcu_l4, dbgmcu_wb, dbgmcu_wl, dbgmcu_n6
             ))]
             {
                 cr.set_dbg_sleep(config.enable_debug_during_sleep);
@@ -526,11 +630,14 @@ fn init_hw(config: Config) -> Peripherals {
             }
         });
 
+        #[cfg(any(stm32h7rs))]
+        // On the H7RS the SYSCFG should not be reset if it is already enabled. This is typically the case when running from external flash and the bootloader enables the SYSCFG.
+        rcc::enable_with_cs::<peripherals::SYSCFG>(cs);
         #[cfg(not(any(stm32f1, stm32wb, stm32wl, stm32h7rs)))]
         rcc::enable_and_reset_with_cs::<peripherals::SYSCFG>(cs);
         #[cfg(not(any(stm32h5, stm32h7, stm32h7rs, stm32wb, stm32wl)))]
         rcc::enable_and_reset_with_cs::<peripherals::PWR>(cs);
-        #[cfg(not(any(stm32f2, stm32f4, stm32f7, stm32l0, stm32h5, stm32h7, stm32h7rs)))]
+        #[cfg(all(flash, not(any(stm32f2, stm32f4, stm32f7, stm32l0, stm32h5, stm32h7, stm32h7rs))))]
         rcc::enable_and_reset_with_cs::<peripherals::FLASH>(cs);
 
         // Enable the VDDIO2 power supply on chips that have it.
@@ -549,13 +656,13 @@ fn init_hw(config: Config) -> Peripherals {
             use crate::pac::pwr::vals;
             crate::pac::PWR.svmcr().modify(|w| {
                 w.set_io2sv(if config.enable_independent_io_supply {
-                    vals::Io2sv::B_0X1
+                    vals::Io2sv::B0x1
                 } else {
-                    vals::Io2sv::B_0X0
+                    vals::Io2sv::B0x0
                 });
             });
         }
-        #[cfg(stm32u5)]
+        #[cfg(any(stm32u5, stm32u3))]
         {
             crate::pac::PWR.svmcr().modify(|w| {
                 w.set_io2sv(config.enable_independent_io_supply);
@@ -590,7 +697,7 @@ fn init_hw(config: Config) -> Peripherals {
             #[cfg(ucpd)]
             ucpd::init(
                 cs,
-                #[cfg(peri_ucpd1)]
+                #[cfg(all(peri_ucpd1, not(stm32n6)))]
                 config.enable_ucpd1_dead_battery,
                 #[cfg(peri_ucpd2)]
                 config.enable_ucpd2_dead_battery,
@@ -609,6 +716,10 @@ fn init_hw(config: Config) -> Peripherals {
             });
 
             gpio::init(cs);
+
+            #[cfg(stm32f1)]
+            crate::pac::AFIO.mapr().modify(|w| w.set_swj_cfg(config.swj.into()));
+
             dma::init(
                 cs,
                 #[cfg(bdma)]
@@ -617,13 +728,33 @@ fn init_hw(config: Config) -> Peripherals {
                 config.dma_interrupt_priority,
                 #[cfg(gpdma)]
                 config.gpdma_interrupt_priority,
+                #[cfg(mdma)]
+                config.mdma_interrupt_priority,
             );
             #[cfg(feature = "exti")]
             exti::init(cs);
 
             rcc::init_rcc(cs, config.rcc);
+
+            // must be before time_driver init to allow refcount reset
+            #[cfg(all(any(stm32wb, stm32wl5x), feature = "low-power"))]
+            hsem::init_hsem(cs);
+
+            // must be after rcc init
+            #[cfg(feature = "_time-driver")]
+            crate::time_driver::init(cs);
+
+            // must be after time-driver init
+            #[cfg(all(feature = "low-power", not(feature = "_lp-time-driver")))]
+            rtc::init_rtc(cs, config.rtc, config.min_stop_pause);
         }
 
         p
     })
+}
+
+/// Performs a busy-wait delay for a specified number of microseconds.
+#[allow(unused)]
+pub(crate) fn block_for_us(us: u64) {
+    cortex_m::asm::delay(unsafe { rcc::get_freqs().sys.to_hertz().unwrap().0 as u64 * us / 1_000_000 } as u32);
 }
